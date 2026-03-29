@@ -1,0 +1,10 @@
+[package]
+name = "quartz-solver"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Thin solver wrapper for Quartz portfolio optimizer"
+
+[dependencies]
+clarabel = { workspace = true }
+quartz-core = { path = "../quartz-core" }

@@ -1,0 +1,12 @@
+[package]
+name = "quartz-portfolio"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Portfolio modeler and compiler for Quartz optimizer"
+
+[dependencies]
+clarabel = { workspace = true }
+serde = { workspace = true }
+quartz-core = { path = "../quartz-core" }
+quartz-solver = { path = "../quartz-solver" }

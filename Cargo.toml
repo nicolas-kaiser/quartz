@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "crates/quartz-core",
+    "crates/quartz-solver",
+    "crates/quartz-portfolio",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "AGPL-3.0"
+
+[workspace.dependencies]
+clarabel = "0.11"
+serde = { version = "1", features = ["derive"] }
