@@ -11,7 +11,7 @@ use clarabel::algebra::CscMatrix;
 use serde::{Deserialize, Serialize};
 
 use quartz_core::{Asset, Dimension, Sense, Universe};
-use quartz_portfolio::{PortfolioModel, Restrictions, Strategy};
+use quartz_portfolio::{FrontierExplorer, PortfolioModel, Restrictions, Strategy};
 
 #[derive(Deserialize)]
 struct ProblemSpec {
@@ -26,6 +26,26 @@ struct ProblemSpec {
     restrictions: RestrictionsSpec,
     #[serde(default)]
     turnover: Option<TurnoverSpec>,
+    /// When present, explore a Pareto frontier instead of a single solve.
+    #[serde(default)]
+    frontier: Option<FrontierSpec>,
+}
+
+#[derive(Deserialize)]
+struct FrontierSpec {
+    /// "sweep" (two dimensions) or "grid" (simplex lattice over all dimensions).
+    mode: String,
+    /// Dimension names: the score_key, or "financial_risk" for the risk dim.
+    #[serde(default)]
+    dim_a: Option<String>,
+    #[serde(default)]
+    dim_b: Option<String>,
+    /// Sweep steps (default 25).
+    #[serde(default)]
+    n_points: Option<usize>,
+    /// Grid lattice resolution (default 5).
+    #[serde(default)]
+    resolution: Option<usize>,
 }
 
 /// Factor covariance model Σ = BFBᵀ + D.
@@ -158,7 +178,7 @@ fn parse_sense(s: &str) -> Result<Sense, String> {
     }
 }
 
-fn run(spec: ProblemSpec) -> Result<SolutionOutput, String> {
+fn run(spec: ProblemSpec) -> Result<String, String> {
     // Universe
     let mut ub = Universe::builder();
     for a in &spec.assets {
@@ -236,7 +256,26 @@ fn run(spec: ProblemSpec) -> Result<SolutionOutput, String> {
     }
     let restrictions = rb.build();
 
-    // Solve
+    // Frontier exploration mode
+    if let Some(fs) = &spec.frontier {
+        let mut explorer = FrontierExplorer::new(&universe, &strategy).restrictions(restrictions);
+        if let Some(t) = &spec.turnover {
+            explorer = explorer.turnover(t.previous_weights.clone(), t.max_turnover);
+        }
+        let result = match fs.mode.as_str() {
+            "sweep" => {
+                let a = fs.dim_a.as_deref().ok_or("frontier sweep requires dim_a")?;
+                let b = fs.dim_b.as_deref().ok_or("frontier sweep requires dim_b")?;
+                explorer.sweep(a, b, fs.n_points.unwrap_or(25))
+            }
+            "grid" => explorer.simplex_grid(fs.resolution.unwrap_or(5)),
+            other => return Err(format!("unknown frontier mode '{other}' (expected sweep|grid)")),
+        }
+        .map_err(|e| e.to_string())?;
+        return Ok(serde_json::to_string_pretty(&result).unwrap());
+    }
+
+    // Single solve
     let mut model = PortfolioModel::new(&universe)
         .strategy(&strategy)
         .restrictions(restrictions);
@@ -245,7 +284,7 @@ fn run(spec: ProblemSpec) -> Result<SolutionOutput, String> {
     }
     let solution = model.solve().map_err(|e| e.to_string())?;
 
-    Ok(SolutionOutput {
+    let out = SolutionOutput {
         status: format!("{:?}", solution.status),
         weights: universe
             .assets
@@ -260,7 +299,8 @@ fn run(spec: ProblemSpec) -> Result<SolutionOutput, String> {
         objective_value: solution.objective_value,
         solve_time_s: solution.solve_time_s,
         iterations: solution.iterations,
-    })
+    };
+    Ok(serde_json::to_string_pretty(&out).unwrap())
 }
 
 fn main() {
@@ -279,7 +319,7 @@ fn main() {
     };
 
     match run(spec) {
-        Ok(out) => println!("{}", serde_json::to_string_pretty(&out).unwrap()),
+        Ok(json) => println!("{json}"),
         Err(e) => {
             println!("{}", serde_json::json!({ "error": e }));
             std::process::exit(1);

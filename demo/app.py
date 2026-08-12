@@ -224,7 +224,7 @@ else:
     risk_model_label = "sample covariance (full n×n)"
 
 # ---------------------------------------------------------------- tabs
-tab_opt, tab_data = st.tabs(["Optimize", "Universe & Data"])
+tab_opt, tab_frontier, tab_data = st.tabs(["Optimize", "Pareto Frontier", "Universe & Data"])
 
 with tab_opt:
     if not dimensions:
@@ -294,6 +294,121 @@ with tab_opt:
 
     with st.expander("Problem spec sent to Rust (JSON)"):
         st.json(spec)
+
+with tab_frontier:
+    st.caption(
+        "Sweep two objectives against each other while all other dimension "
+        "weights stay fixed; grey points are dominated, colored points form "
+        "the Pareto frontier."
+    )
+    active_dims = [
+        "financial_risk" if d["kind"] == "risk" else d["score_key"] for d in dimensions
+    ]
+    if len(active_dims) < 2:
+        st.warning("Give at least two objectives a nonzero weight to explore a frontier.")
+    else:
+        c1, c2, c3 = st.columns(3)
+        default_x = active_dims.index("financial_risk") if "financial_risk" in active_dims else 0
+        default_y = (
+            active_dims.index("expected_return")
+            if "expected_return" in active_dims
+            else (1 if default_x != 1 else 0)
+        )
+        dim_x = c1.selectbox("X axis (trade off)", active_dims, index=default_x)
+        dim_y = c2.selectbox("Y axis (trade off)", active_dims, index=default_y)
+        n_points = c3.slider("Points", 5, 100, 25)
+
+        if dim_x == dim_y:
+            st.warning("Pick two different dimensions.")
+        else:
+            frontier_spec = dict(spec)
+            frontier_spec["frontier"] = {
+                "mode": "sweep",
+                "dim_a": dim_y,
+                "dim_b": dim_x,
+                "n_points": n_points,
+            }
+            fresult = solve(frontier_spec, binary)
+
+            if "error" in fresult:
+                st.error(f"Frontier error: {fresult['error']}")
+            else:
+                def axis_value(scores: dict, dim: str) -> float:
+                    # Volatility is more readable than variance; sqrt is
+                    # monotone so efficiency flags are unaffected.
+                    if dim == "financial_risk":
+                        return float(np.sqrt(max(scores.get(dim, 0.0), 0.0)))
+                    return float(scores.get(dim, 0.0))
+
+                def axis_label(dim: str) -> str:
+                    return "Volatility (ann.)" if dim == "financial_risk" else dim
+
+                rows = []
+                for pt in fresult["points"]:
+                    top = sorted(pt["weights"], key=lambda t: -t[1])[:3]
+                    rows.append(
+                        {
+                            "x": axis_value(pt["portfolio_scores"], dim_x),
+                            "y": axis_value(pt["portfolio_scores"], dim_y),
+                            "efficient": pt["is_efficient"],
+                            "top holdings": ", ".join(
+                                f"{tid} {tw * 100:.0f}%" for tid, tw in top if tw > 0.005
+                            ),
+                        }
+                    )
+                fdf = pd.DataFrame(rows)
+
+                fig = go.Figure()
+                dominated = fdf[~fdf["efficient"]]
+                efficient = fdf[fdf["efficient"]].sort_values("x")
+                if not dominated.empty:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=dominated["x"], y=dominated["y"], mode="markers",
+                            marker=dict(color="grey", size=7, opacity=0.5),
+                            name="dominated", text=dominated["top holdings"],
+                            hovertemplate="%{x:.4f}, %{y:.4f}<br>%{text}<extra>dominated</extra>",
+                        )
+                    )
+                fig.add_trace(
+                    go.Scatter(
+                        x=efficient["x"], y=efficient["y"], mode="lines+markers",
+                        marker=dict(size=9), name="Pareto frontier",
+                        text=efficient["top holdings"],
+                        hovertemplate="%{x:.4f}, %{y:.4f}<br>%{text}<extra>efficient</extra>",
+                    )
+                )
+                # Current sidebar strategy as a reference marker
+                current = solve(spec, binary)
+                if "error" not in current and current["status"] == "Optimal":
+                    fig.add_trace(
+                        go.Scatter(
+                            x=[axis_value(current["portfolio_scores"], dim_x)],
+                            y=[axis_value(current["portfolio_scores"], dim_y)],
+                            mode="markers",
+                            marker=dict(symbol="star", size=16, color="orange"),
+                            name="current strategy",
+                        )
+                    )
+                fig.update_layout(
+                    xaxis_title=axis_label(dim_x),
+                    yaxis_title=axis_label(dim_y),
+                    title=f"{axis_label(dim_y)} vs {axis_label(dim_x)} "
+                    f"({len(fdf)} points, {fresult['n_skipped']} infeasible skipped)",
+                    height=550,
+                )
+                st.plotly_chart(fig, width="stretch")
+
+                with st.expander("Frontier points detail"):
+                    detail_rows = []
+                    for pt in fresult["points"]:
+                        row = {name: w for name, w in pt["dimension_weights"]}
+                        row.update(
+                            {f"→ {k}": v for k, v in sorted(pt["portfolio_scores"].items())}
+                        )
+                        row["efficient"] = pt["is_efficient"]
+                        detail_rows.append(row)
+                    st.dataframe(pd.DataFrame(detail_rows), width="stretch")
 
 with tab_data:
     st.subheader("Universe")
