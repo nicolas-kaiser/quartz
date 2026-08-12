@@ -15,6 +15,7 @@ A multi-dimensional portfolio optimizer in Rust. It is a **modeler + compiler**,
 ```sh
 cargo build                                              # Build all crates
 cargo test                                               # Run all unit tests
+cargo test -p quartz-portfolio --no-default-features     # Serial fallback (no rayon) must also pass
 cargo test -p quartz-portfolio                           # Test a single crate
 cargo test -p quartz-portfolio compiler::                # Run tests in one module
 cargo run --example markowitz -p quartz-portfolio        # Min-variance, 3 assets
@@ -42,6 +43,10 @@ A fourth crate, `quartz-demo`, is a JSON stdin/stdout CLI bridge used by the Str
 `PortfolioModel::solve()` (`model.rs`) → `compile()` (`compiler.rs`) → `solve_qp()` (quartz-solver) → `PortfolioSolution` (`solution.rs`).
 
 The compiler is the heart of the system. Each constraint type in `quartz-portfolio/src/constraints/` implements `compile() -> ConstraintContribution` — a set of `(row, col, val)` triplets, `b` entries, and equality/inequality row counts. The compiler offsets local row indices, assembles everything into Clarabel's `CscMatrix` (no `sprs` dependency), and orders rows **equalities first (ZeroConeT), then inequalities (NonnegativeConeT)**.
+
+### Parallel batch solving
+
+`batch.rs` exposes `solve_batch(&[BatchProblem], &SolverSettings)` — independent problems (e.g. one per backtest date) solved on the rayon pool, results in input order, errors isolated per item (infeasible is an `Ok` status, not `Err`). Parallelism is the `parallel` cargo feature (default on; `rayon` optional dep) routed through the crate-private `par::par_map` shim so the serial fallback compiles identically — the frontier module uses the same shim. Clarabel is deterministic and has no shared mutable state, so results are bit-identical across thread counts. Turnover *chaining* across dates is inherently sequential and out of scope; don't use `verbose: true` in parallel runs (interleaved stdout).
 
 ### Pareto frontier
 

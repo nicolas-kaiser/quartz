@@ -10,3 +10,8 @@ clarabel = { workspace = true }
 serde = { workspace = true }
 quartz-core = { path = "../quartz-core" }
 quartz-solver = { path = "../quartz-solver" }
+rayon = { workspace = true, optional = true }
+
+[features]
+default = ["parallel"]
+parallel = ["dep:rayon"]

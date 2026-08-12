@@ -53,6 +53,9 @@ price paths and says so.
 - **Pareto Frontier tab** — sweep any two objectives against each other
   (e.g. volatility vs expected return); dominated points shown grey, the
   efficient frontier connected, with your current strategy marked on the chart
+- **Backtest tab** — rolling re-optimization (weekly/monthly rebalances,
+  trailing estimation window) solved as one parallel batch in Rust; shows the
+  equity curve, weight evolution, realized stats, and the parallel speedup
 
 The "Universe & Data" tab shows the asset table, normalized prices, and the
 return correlation matrix. The JSON spec sent to Rust is visible in an expander

@@ -70,13 +70,13 @@ def pca_factor_model(cov: pd.DataFrame, k: int):
     return loadings, np.diag(factor_var), specific
 
 
-def solve(spec: dict, binary: Path) -> dict:
+def solve(spec: dict, binary: Path, timeout: int = 30) -> dict:
     proc = subprocess.run(
         [str(binary)],
         input=json.dumps(spec),
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=timeout,
     )
     try:
         return json.loads(proc.stdout)
@@ -224,7 +224,9 @@ else:
     risk_model_label = "sample covariance (full n×n)"
 
 # ---------------------------------------------------------------- tabs
-tab_opt, tab_frontier, tab_data = st.tabs(["Optimize", "Pareto Frontier", "Universe & Data"])
+tab_opt, tab_frontier, tab_backtest, tab_data = st.tabs(
+    ["Optimize", "Pareto Frontier", "Backtest", "Universe & Data"]
+)
 
 with tab_opt:
     if not dimensions:
@@ -409,6 +411,114 @@ with tab_frontier:
                         row["efficient"] = pt["is_efficient"]
                         detail_rows.append(row)
                     st.dataframe(pd.DataFrame(detail_rows), width="stretch")
+
+with tab_backtest:
+    st.caption(
+        "Rolling backtest: at each rebalance date, covariance and expected "
+        "returns are re-estimated from a trailing window and the strategy is "
+        "re-solved — all dates in one parallel batch (Rust + rayon). "
+        "Simplifications: dates are solved independently (no turnover "
+        "chaining) and weights are held constant between rebalances."
+    )
+    c1, c2 = st.columns(2)
+    rebal_freq = c1.radio("Rebalance frequency", ["Weekly", "Monthly"], horizontal=True)
+    window = c2.slider("Trailing estimation window (days)", 60, 252, 126)
+
+    returns_bt = prices.pct_change().dropna()
+    period = "W" if rebal_freq == "Weekly" else "M"
+    all_rebal = [g.index[-1] for _, g in returns_bt.groupby(returns_bt.index.to_period(period))]
+    positions = {d: i for i, d in enumerate(returns_bt.index)}
+    rebal_dates = [d for d in all_rebal if positions[d] >= window]
+
+    if len(rebal_dates) < 2:
+        st.warning(
+            f"Not enough history: need at least 2 rebalance dates with "
+            f"{window} days of trailing data. Shorten the window."
+        )
+    else:
+        items = []
+        for t in rebal_dates:
+            win = returns_bt.loc[:t].tail(window)
+            win_cov = win.cov() * TRADING_DAYS
+            item = {
+                "scores": {
+                    tkr: {"expected_return": float(r)}
+                    for tkr, r in (win.mean() * TRADING_DAYS).items()
+                }
+            }
+            if use_factor:
+                loadings, factor_cov_m, specific = pca_factor_model(win_cov, n_factors)
+                item["factor_model"] = {
+                    "loadings": loadings.tolist(),
+                    "factor_cov": factor_cov_m.tolist(),
+                    "specific_variance": specific.tolist(),
+                }
+            else:
+                item["covariance"] = win_cov.values.tolist()
+            items.append(item)
+
+        batch_spec = {k: v for k, v in spec.items() if k != "frontier"}
+        batch_spec["batch"] = {"items": items}
+        bresult = solve(batch_spec, binary, timeout=120)
+
+        if "error" in bresult:
+            st.error(f"Backtest error: {bresult['error']}")
+        else:
+            weights_rows, used_dates, n_bad = [], [], 0
+            for t, sol in zip(rebal_dates, bresult["solutions"]):
+                if "error" in sol or sol.get("status") != "Optimal":
+                    n_bad += 1
+                    continue
+                weights_rows.append({w["id"]: w["weight"] for w in sol["weights"]})
+                used_dates.append(t)
+
+            if not weights_rows:
+                st.error("No rebalance date solved to optimality — loosen the constraints.")
+            else:
+                wall_ms = bresult["wall_time_s"] * 1000
+                sum_ms = bresult["sum_solve_time_s"] * 1000
+                st.success(
+                    f"**{bresult['n_items']} portfolio solves in {wall_ms:.1f} ms wall time** "
+                    f"({sum_ms:.1f} ms of solver time ≈ {sum_ms / max(wall_ms, 1e-9):.1f}× parallel)"
+                    + (f" · {n_bad} dates skipped (non-optimal)" if n_bad else "")
+                )
+
+                W = pd.DataFrame(weights_rows, index=pd.DatetimeIndex(used_dates))[tickers].fillna(0.0)
+
+                # Equity curve: hold weights from each rebalance close to the next
+                segments = []
+                for k, t in enumerate(W.index):
+                    end = W.index[k + 1] if k + 1 < len(W.index) else returns_bt.index[-1]
+                    seg = returns_bt.loc[t:end].iloc[1:]
+                    if not seg.empty:
+                        segments.append(seg @ W.iloc[k])
+                port_ret = pd.concat(segments)
+                equity = (1 + port_ret).cumprod()
+
+                ann_ret = port_ret.mean() * TRADING_DAYS
+                ann_vol = port_ret.std() * np.sqrt(TRADING_DAYS)
+                turnover_per_rebal = W.diff().abs().sum(axis=1).iloc[1:].mean()
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Ann. return (realized)", f"{ann_ret * 100:.2f}%")
+                m2.metric("Ann. volatility", f"{ann_vol * 100:.2f}%")
+                m3.metric("Sharpe (rf=0)", f"{ann_ret / ann_vol:.2f}" if ann_vol > 0 else "—")
+                m4.metric("Avg turnover / rebalance", f"{turnover_per_rebal * 100:.1f}%")
+
+                fig = px.line(
+                    equity, labels={"value": "Growth of 1", "index": "", "variable": ""},
+                    title=f"Equity curve — {len(W)} rebalances, {window}d window, "
+                    f"risk model: {risk_model_label}",
+                )
+                fig.update_layout(showlegend=False)
+                st.plotly_chart(fig, width="stretch")
+
+                fig = px.area(
+                    W, labels={"value": "Weight", "index": "", "variable": ""},
+                    title="Weight evolution at rebalance dates",
+                )
+                fig.update_layout(yaxis_tickformat=".0%")
+                st.plotly_chart(fig, width="stretch")
 
 with tab_data:
     st.subheader("Universe")

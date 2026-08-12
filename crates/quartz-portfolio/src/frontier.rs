@@ -182,18 +182,19 @@ impl<'a> FrontierExplorer<'a> {
             });
         }
 
-        let mut points = Vec::new();
-        let mut n_skipped = 0;
-        for i in 0..n_points {
-            let alpha = i as f64 / (n_points - 1) as f64;
-            let mut dims = base.dimensions.clone();
-            dims[ia].weight = alpha * s;
-            dims[ib].weight = (1.0 - alpha) * s;
-            match self.solve_point(&base, dims)? {
-                Some(p) => points.push(p),
-                None => n_skipped += 1,
-            }
-        }
+        let weight_sets: Vec<Vec<Dimension>> = (0..n_points)
+            .map(|i| {
+                let alpha = i as f64 / (n_points - 1) as f64;
+                let mut dims = base.dimensions.clone();
+                dims[ia].weight = alpha * s;
+                dims[ib].weight = (1.0 - alpha) * s;
+                dims
+            })
+            .collect();
+        let solved = crate::par::par_map(&weight_sets, |dims| {
+            self.solve_point(&base, dims.clone())
+        });
+        let (points, n_skipped) = collect_points(solved)?;
 
         let objective_dims = vec![
             base.dimensions[ia].clone(),
@@ -224,18 +225,20 @@ impl<'a> FrontierExplorer<'a> {
             });
         }
 
-        let mut points = Vec::new();
-        let mut n_skipped = 0;
-        for comp in compositions(resolution, m) {
-            let mut dims = base.dimensions.clone();
-            for (d, &c) in dims.iter_mut().zip(&comp) {
-                d.weight = c as f64 / resolution as f64;
-            }
-            match self.solve_point(&base, dims)? {
-                Some(p) => points.push(p),
-                None => n_skipped += 1,
-            }
-        }
+        let weight_sets: Vec<Vec<Dimension>> = compositions(resolution, m)
+            .into_iter()
+            .map(|comp| {
+                let mut dims = base.dimensions.clone();
+                for (d, &c) in dims.iter_mut().zip(&comp) {
+                    d.weight = c as f64 / resolution as f64;
+                }
+                dims
+            })
+            .collect();
+        let solved = crate::par::par_map(&weight_sets, |dims| {
+            self.solve_point(&base, dims.clone())
+        });
+        let (points, n_skipped) = collect_points(solved)?;
 
         finish(points, &base.dimensions, n_skipped, n_points)
     }
@@ -306,6 +309,25 @@ fn find_dimension(dims: &[Dimension], name: &str) -> Result<usize, FrontierError
     dims.iter()
         .position(|d| d.name == name)
         .ok_or_else(|| FrontierError::UnknownDimension(name.to_string()))
+}
+
+/// Collect per-point solve outcomes in generation order.
+///
+/// Unlike a serial loop, parallel execution computes every point before errors
+/// surface; the error at the lowest index propagates. Observably identical,
+/// since structural errors (compile/merge) hit every point the same way.
+fn collect_points(
+    solved: Vec<Result<Option<FrontierPoint>, FrontierError>>,
+) -> Result<(Vec<FrontierPoint>, usize), FrontierError> {
+    let mut points = Vec::new();
+    let mut n_skipped = 0;
+    for result in solved {
+        match result? {
+            Some(p) => points.push(p),
+            None => n_skipped += 1,
+        }
+    }
+    Ok((points, n_skipped))
 }
 
 /// Apply the dominance filter and assemble the result.

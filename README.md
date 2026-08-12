@@ -39,6 +39,7 @@ Quartz is a **modeler + compiler**: it translates your high-level portfolio stra
 - **Turnover control** — limit total portfolio rebalancing with warm-start from previous weights
 - **Factor covariance models** — `Σ = BFBᵀ + D` compiles to a sparse QP with k auxiliary variables (O(nk²) instead of O(n²))
 - **Pareto frontier exploration** — sweep two dimensions against each other or enumerate a full simplex grid, with non-dominated filtering (`FrontierExplorer`)
+- **Parallel batch solving** — `solve_batch` runs independent problems on all cores via `rayon` (1000-date backtest in ~13 ms); opt out with `default-features = false`
 - **Pure Rust** — zero C/C++ dependencies, compiles anywhere Rust does
 - **~1ms solve time** — for typical 5-asset problems with full constraint sets
 
@@ -161,6 +162,9 @@ cargo run --example multi_dimension -p quartz-portfolio
 
 # Pareto frontier sweep (risk vs return trade-off table)
 cargo run --example frontier -p quartz-portfolio
+
+# Parallel backtest: 1000 dates, serial vs parallel timing
+cargo run --release --example backtest -p quartz-portfolio
 ```
 
 ## Building
@@ -176,7 +180,7 @@ Requires **Rust stable** (edition 2021). No C/C++ toolchain needed.
 
 - [x] Factor covariance model support (`Σ = BFBᵀ + D`) for O(nk²) scaling
 - [x] Pareto frontier exploration (multi-objective trade-off visualization)
-- [ ] Parallel batch solving with `rayon` (backtest 1000 dates in parallel)
+- [x] Parallel batch solving with `rayon` (backtest 1000 dates in parallel)
 - [ ] Python bindings via PyO3 + maturin
 - [ ] OSQP backend for warm-start support
 - [ ] SOCP support for CVaR and tracking error constraints

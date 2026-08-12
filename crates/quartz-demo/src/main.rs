@@ -11,7 +11,9 @@ use clarabel::algebra::CscMatrix;
 use serde::{Deserialize, Serialize};
 
 use quartz_core::{Asset, Dimension, Sense, Universe};
-use quartz_portfolio::{FrontierExplorer, PortfolioModel, Restrictions, Strategy};
+use quartz_portfolio::solution::PortfolioSolution;
+use quartz_portfolio::{solve_batch, BatchProblem, FrontierExplorer, PortfolioModel, Restrictions, Strategy};
+use quartz_solver::SolverSettings;
 
 #[derive(Deserialize)]
 struct ProblemSpec {
@@ -29,6 +31,29 @@ struct ProblemSpec {
     /// When present, explore a Pareto frontier instead of a single solve.
     #[serde(default)]
     frontier: Option<FrontierSpec>,
+    /// When present, solve many independent problems in parallel (backtest mode).
+    #[serde(default)]
+    batch: Option<BatchSpec>,
+}
+
+#[derive(Deserialize)]
+struct BatchSpec {
+    items: Vec<BatchItemSpec>,
+}
+
+/// Per-item overrides applied on top of the shared spec-level assets.
+#[derive(Deserialize)]
+struct BatchItemSpec {
+    /// Item covariance; falls back to the spec-level covariance if omitted.
+    #[serde(default)]
+    covariance: Option<Vec<Vec<f64>>>,
+    #[serde(default)]
+    factor_model: Option<FactorModelSpec>,
+    /// Sparse score overrides: asset id -> { score_key -> value }.
+    #[serde(default)]
+    scores: HashMap<String, HashMap<String, f64>>,
+    #[serde(default)]
+    turnover: Option<TurnoverSpec>,
 }
 
 #[derive(Deserialize)]
@@ -141,6 +166,23 @@ struct WeightOutput {
     weight: f64,
 }
 
+#[derive(Serialize)]
+struct BatchOutput {
+    solutions: Vec<BatchItemOutput>,
+    n_items: usize,
+    /// Wall-clock time around solve_batch only (excludes universe building).
+    wall_time_s: f64,
+    /// Sum of per-item solver times (excludes compile/extraction overhead).
+    sum_solve_time_s: f64,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum BatchItemOutput {
+    Ok(SolutionOutput),
+    Err { error: String },
+}
+
 fn dense_to_csc(rows: &[Vec<f64>]) -> Result<CscMatrix<f64>, String> {
     let m = rows.len();
     if m == 0 {
@@ -178,10 +220,16 @@ fn parse_sense(s: &str) -> Result<Sense, String> {
     }
 }
 
-fn run(spec: ProblemSpec) -> Result<String, String> {
-    // Universe
+/// Build a universe from the shared assets plus optional per-item score
+/// overrides and either covariance form.
+fn build_universe(
+    assets: &[AssetSpec],
+    covariance: &Option<Vec<Vec<f64>>>,
+    factor_model: &Option<FactorModelSpec>,
+    score_overrides: Option<&HashMap<String, HashMap<String, f64>>>,
+) -> Result<Universe, String> {
     let mut ub = Universe::builder();
-    for a in &spec.assets {
+    for a in assets {
         let mut asset = Asset::new(a.id.as_str());
         for (k, v) in &a.tags {
             asset = asset.tag(k, v);
@@ -189,9 +237,16 @@ fn run(spec: ProblemSpec) -> Result<String, String> {
         for (k, &v) in &a.scores {
             asset = asset.score(k, v);
         }
+        if let Some(overrides) = score_overrides {
+            if let Some(asset_scores) = overrides.get(&a.id) {
+                for (k, &v) in asset_scores {
+                    asset = asset.score(k, v);
+                }
+            }
+        }
         ub = ub.add_asset(asset);
     }
-    let universe = match (&spec.covariance, &spec.factor_model) {
+    match (covariance, factor_model) {
         (Some(cov), None) => ub.covariance_full(dense_to_csc(cov)?).build(),
         (None, Some(fm)) => ub
             .covariance_factor(
@@ -205,7 +260,41 @@ fn run(spec: ProblemSpec) -> Result<String, String> {
         }
         (None, None) => return Err("one of covariance or factor_model is required".into()),
     }
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())
+}
+
+fn solution_output(universe: &Universe, solution: PortfolioSolution) -> SolutionOutput {
+    SolutionOutput {
+        status: format!("{:?}", solution.status),
+        weights: universe
+            .assets
+            .iter()
+            .zip(solution.weights_vec.iter())
+            .map(|(a, &w)| WeightOutput {
+                id: a.id.to_string(),
+                weight: w,
+            })
+            .collect(),
+        portfolio_scores: solution.portfolio_scores,
+        objective_value: solution.objective_value,
+        solve_time_s: solution.solve_time_s,
+        iterations: solution.iterations,
+    }
+}
+
+fn run(spec: ProblemSpec) -> Result<String, String> {
+    let universe = if spec.batch.is_some() {
+        // Batch items build their own universes; a spec-level covariance is
+        // only a fallback and may legitimately be absent.
+        None
+    } else {
+        Some(build_universe(
+            &spec.assets,
+            &spec.covariance,
+            &spec.factor_model,
+            None,
+        )?)
+    };
 
     // Strategy
     let mut sb = Strategy::builder(&spec.strategy.name);
@@ -256,6 +345,75 @@ fn run(spec: ProblemSpec) -> Result<String, String> {
     }
     let restrictions = rb.build();
 
+    // Batch mode (backtest): many independent problems solved in parallel
+    if let Some(batch) = &spec.batch {
+        if spec.frontier.is_some() {
+            return Err("batch and frontier modes are mutually exclusive".into());
+        }
+        if spec.turnover.is_some() {
+            return Err("in batch mode, specify turnover per item, not at the spec level".into());
+        }
+
+        // Per-item universes; a bad item doesn't kill the batch.
+        let built: Vec<Result<Universe, String>> = batch
+            .items
+            .iter()
+            .map(|item| {
+                let (cov, fm) = if item.covariance.is_some() || item.factor_model.is_some() {
+                    (&item.covariance, &item.factor_model)
+                } else {
+                    (&spec.covariance, &spec.factor_model)
+                };
+                build_universe(&spec.assets, cov, fm, Some(&item.scores))
+            })
+            .collect();
+
+        let problems: Vec<BatchProblem> = built
+            .iter()
+            .zip(&batch.items)
+            .filter_map(|(b, item)| {
+                b.as_ref().ok().map(|u| {
+                    let mut p = BatchProblem::new(u, &strategy).restrictions(restrictions.clone());
+                    if let Some(t) = &item.turnover {
+                        p = p.turnover(t.previous_weights.clone(), t.max_turnover);
+                    }
+                    p
+                })
+            })
+            .collect();
+
+        let t0 = std::time::Instant::now();
+        let results = solve_batch(&problems, &SolverSettings::default());
+        let wall_time_s = t0.elapsed().as_secs_f64();
+
+        // Reassemble in item order: universe-build errors keep their slot.
+        let mut results_iter = results.into_iter();
+        let mut solutions = Vec::with_capacity(built.len());
+        let mut sum_solve_time_s = 0.0;
+        for b in &built {
+            match b {
+                Err(e) => solutions.push(BatchItemOutput::Err { error: e.clone() }),
+                Ok(u) => match results_iter.next().expect("one result per built universe") {
+                    Ok(sol) => {
+                        sum_solve_time_s += sol.solve_time_s;
+                        solutions.push(BatchItemOutput::Ok(solution_output(u, sol)));
+                    }
+                    Err(e) => solutions.push(BatchItemOutput::Err { error: e.to_string() }),
+                },
+            }
+        }
+        let out = BatchOutput {
+            n_items: solutions.len(),
+            solutions,
+            wall_time_s,
+            sum_solve_time_s,
+        };
+        // Compact JSON: pretty-printing triples the size of large batches.
+        return Ok(serde_json::to_string(&out).unwrap());
+    }
+
+    let universe = universe.expect("universe is built for non-batch modes");
+
     // Frontier exploration mode
     if let Some(fs) = &spec.frontier {
         let mut explorer = FrontierExplorer::new(&universe, &strategy).restrictions(restrictions);
@@ -283,23 +441,7 @@ fn run(spec: ProblemSpec) -> Result<String, String> {
         model = model.turnover(t.previous_weights.clone(), t.max_turnover);
     }
     let solution = model.solve().map_err(|e| e.to_string())?;
-
-    let out = SolutionOutput {
-        status: format!("{:?}", solution.status),
-        weights: universe
-            .assets
-            .iter()
-            .zip(solution.weights_vec.iter())
-            .map(|(a, &w)| WeightOutput {
-                id: a.id.to_string(),
-                weight: w,
-            })
-            .collect(),
-        portfolio_scores: solution.portfolio_scores,
-        objective_value: solution.objective_value,
-        solve_time_s: solution.solve_time_s,
-        iterations: solution.iterations,
-    };
+    let out = solution_output(&universe, solution);
     Ok(serde_json::to_string_pretty(&out).unwrap())
 }
 
