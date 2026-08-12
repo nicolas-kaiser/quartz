@@ -37,6 +37,7 @@ Quartz is a **modeler + compiler**: it translates your high-level portfolio stra
 - **Strategy / Tactic / Restriction** — three-layer architecture separating long-term vision, short-term adjustments, and compliance rules
 - **Exclusion lists** — exclude by tag (sector = Tobacco) or by specific asset
 - **Turnover control** — limit total portfolio rebalancing with warm-start from previous weights
+- **Factor covariance models** — `Σ = BFBᵀ + D` compiles to a sparse QP with k auxiliary variables (O(nk²) instead of O(n²))
 - **Pure Rust** — zero C/C++ dependencies, compiles anywhere Rust does
 - **~1ms solve time** — for typical 5-asset problems with full constraint sets
 
@@ -169,7 +170,7 @@ Requires **Rust stable** (edition 2021). No C/C++ toolchain needed.
 
 ## Roadmap
 
-- [ ] Factor covariance model support (`Σ = BFBᵀ + D`) for O(nk²) scaling
+- [x] Factor covariance model support (`Σ = BFBᵀ + D`) for O(nk²) scaling
 - [ ] Pareto frontier exploration (multi-objective trade-off visualization)
 - [ ] Parallel batch solving with `rayon` (backtest 1000 dates in parallel)
 - [ ] Python bindings via PyO3 + maturin

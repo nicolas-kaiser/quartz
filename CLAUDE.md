@@ -51,9 +51,9 @@ The compiler is the heart of the system. Each constraint type in `quartz-portfol
 
 ### Key design decisions
 
-- Turnover control adds n auxiliary variables: decision vector goes from `[w]` to `[w, t]` (`n_assets` + `n_aux` in `CompiledProblem`).
+- Auxiliary variables extend the decision vector in a fixed order: `[w (n), t (n, if turnover), y (k, if factor covariance)]`. Turnover hardcodes t at columns `n..2n`, so y always comes after t (`n_aux` in `CompiledProblem` counts both).
 - Tags are `HashMap<String, String>` and scores `HashMap<String, f64>` — extensible, not enums.
-- `CovarianceModel::Factor` is defined in quartz-core but not yet implemented in the compiler (returns `NoCovarianceForQuadratic` paths only handle the full model).
+- `CovarianceModel::Factor` (Σ = BFBᵀ + D) compiles via k auxiliary variables y = Bᵀw so the objective is `yᵀFy + wᵀDw` (block-diagonal sparse P, O(nk²)) plus k equality link rows (`constraints/factor.rs`). y vars are only allocated when a quadratic dimension is present — dead free variables can make Clarabel's KKT system singular. Covariance matrices (Σ and F) must be stored full-symmetric; the compiler extracts the upper triangle (Clarabel silently drops strict-lower-triangle P entries).
 - No MIP support in v1: no cardinality or semi-continuous constraints.
 
 ## Conventions

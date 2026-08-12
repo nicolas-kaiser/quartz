@@ -1,12 +1,14 @@
 pub mod allocation;
 pub mod bounds;
 pub mod exclusion;
+pub mod factor;
 pub mod scoring;
 pub mod turnover;
 
 pub use allocation::{FullyInvested, GroupConstraint};
 pub use bounds::WeightBounds;
 pub use exclusion::Exclusion;
+pub use factor::FactorLink;
 pub use scoring::{ScoreBound, ScoreConstraint};
 pub use turnover::TurnoverConstraint;
 

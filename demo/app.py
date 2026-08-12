@@ -55,6 +55,21 @@ def load_data():
     return prices, assets, cov, exp_ret
 
 
+def pca_factor_model(cov: pd.DataFrame, k: int):
+    """Top-k PCA factor model estimated from the sample covariance.
+
+    Eigendecompose Σ, keep the k largest components: B = Q_k, F = diag(λ_k),
+    D = diag(Σ − BFBᵀ) clipped to ≥ 0 so the residual variance stays valid.
+    """
+    eigvals, eigvecs = np.linalg.eigh(cov.values)  # ascending order
+    top = np.argsort(eigvals)[::-1][:k]
+    loadings = eigvecs[:, top]
+    factor_var = eigvals[top]
+    common = (loadings * factor_var) @ loadings.T
+    specific = np.clip(np.diag(cov.values) - np.diag(common), 1e-10, None)
+    return loadings, np.diag(factor_var), specific
+
+
 def solve(spec: dict, binary: Path) -> dict:
     proc = subprocess.run(
         [str(binary)],
@@ -96,6 +111,18 @@ st.caption(
 )
 
 # ---------------------------------------------------------------- sidebar
+st.sidebar.header("Risk model")
+cov_choice = st.sidebar.radio(
+    "Covariance model",
+    ["Sample (full n×n)", "k-factor (PCA)"],
+    help="The factor model compiles to a sparse QP with k auxiliary variables "
+    "(y = Bᵀw), scaling O(nk²) instead of O(n²).",
+)
+use_factor = cov_choice.startswith("k-factor")
+n_factors = 0
+if use_factor:
+    n_factors = st.sidebar.slider("Number of factors k", 1, min(5, len(tickers) - 1), 3)
+
 st.sidebar.header("Strategy")
 
 st.sidebar.subheader("Objective weights")
@@ -168,7 +195,6 @@ for key, weight, sense in [
 
 spec = {
     "assets": asset_specs,
-    "covariance": cov.loc[tickers, tickers].values.tolist(),
     "strategy": {
         "name": "Streamlit Demo",
         "dimensions": dimensions,
@@ -183,6 +209,19 @@ spec = {
         "exclude_tags": [["sector", s] for s in excluded_sectors],
     },
 }
+
+cov_ordered = cov.loc[tickers, tickers]
+if use_factor:
+    loadings, factor_cov, specific = pca_factor_model(cov_ordered, n_factors)
+    spec["factor_model"] = {
+        "loadings": loadings.tolist(),
+        "factor_cov": factor_cov.tolist(),
+        "specific_variance": specific.tolist(),
+    }
+    risk_model_label = f"{n_factors}-factor PCA (Σ = BFBᵀ + D)"
+else:
+    spec["covariance"] = cov_ordered.values.tolist()
+    risk_model_label = "sample covariance (full n×n)"
 
 # ---------------------------------------------------------------- tabs
 tab_opt, tab_data = st.tabs(["Optimize", "Universe & Data"])
@@ -200,7 +239,7 @@ with tab_opt:
 
     status = result["status"]
     if status == "Optimal":
-        st.success(f"Status: **{status}**")
+        st.success(f"Status: **{status}** · risk model: {risk_model_label}")
     elif status == "Infeasible":
         st.error(
             "Status: **Infeasible** — the constraints contradict each other. "

@@ -42,6 +42,9 @@ price paths and says so.
 
 ## What you can play with
 
+- **Risk model** — full sample covariance, or a k-factor PCA model
+  (Σ = BFBᵀ + D estimated by eigendecomposition) that exercises Quartz's
+  O(nk²) factor covariance path
 - **Objective weights** — variance, expected return, environmental / social /
   governance scores, transition and physical risk (Quartz normalizes them)
 - **Group constraints** — min/max allocation per currency or sector

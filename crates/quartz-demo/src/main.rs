@@ -16,12 +16,27 @@ use quartz_portfolio::{PortfolioModel, Restrictions, Strategy};
 #[derive(Deserialize)]
 struct ProblemSpec {
     assets: Vec<AssetSpec>,
-    /// Dense n×n covariance matrix, row-major.
-    covariance: Vec<Vec<f64>>,
+    /// Dense n×n covariance matrix, row-major. Exactly one of `covariance`
+    /// and `factor_model` must be provided.
+    #[serde(default)]
+    covariance: Option<Vec<Vec<f64>>>,
+    #[serde(default)]
+    factor_model: Option<FactorModelSpec>,
     strategy: StrategySpec,
     restrictions: RestrictionsSpec,
     #[serde(default)]
     turnover: Option<TurnoverSpec>,
+}
+
+/// Factor covariance model Σ = BFBᵀ + D.
+#[derive(Deserialize)]
+struct FactorModelSpec {
+    /// Dense n×k loadings B, row-major.
+    loadings: Vec<Vec<f64>>,
+    /// Dense k×k factor covariance F, row-major, full-symmetric.
+    factor_cov: Vec<Vec<f64>>,
+    /// Length-n specific variance diagonal d (all ≥ 0).
+    specific_variance: Vec<f64>,
 }
 
 #[derive(Deserialize)]
@@ -156,8 +171,21 @@ fn run(spec: ProblemSpec) -> Result<SolutionOutput, String> {
         }
         ub = ub.add_asset(asset);
     }
-    let cov = dense_to_csc(&spec.covariance)?;
-    let universe = ub.covariance_full(cov).build().map_err(|e| e.to_string())?;
+    let universe = match (&spec.covariance, &spec.factor_model) {
+        (Some(cov), None) => ub.covariance_full(dense_to_csc(cov)?).build(),
+        (None, Some(fm)) => ub
+            .covariance_factor(
+                dense_to_csc(&fm.loadings)?,
+                dense_to_csc(&fm.factor_cov)?,
+                fm.specific_variance.clone(),
+            )
+            .build(),
+        (Some(_), Some(_)) => {
+            return Err("provide either covariance or factor_model, not both".into())
+        }
+        (None, None) => return Err("one of covariance or factor_model is required".into()),
+    }
+    .map_err(|e| e.to_string())?;
 
     // Strategy
     let mut sb = Strategy::builder(&spec.strategy.name);

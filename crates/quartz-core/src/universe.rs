@@ -31,6 +31,15 @@ pub enum UniverseError {
         n_assets: usize,
         loadings_rows: usize,
     },
+    FactorCovDimensionMismatch {
+        k_factors: usize,
+        rows: usize,
+        cols: usize,
+    },
+    InvalidSpecificVariance {
+        index: usize,
+        value: f64,
+    },
     DuplicateAssetId(String),
     InvalidScore {
         asset_id: String,
@@ -56,6 +65,18 @@ impl std::fmt::Display for UniverseError {
                 write!(
                     f,
                     "Factor loadings rows ({loadings_rows}) does not match number of assets ({n_assets})"
+                )
+            }
+            UniverseError::FactorCovDimensionMismatch { k_factors, rows, cols } => {
+                write!(
+                    f,
+                    "Factor covariance is {rows}x{cols}, expected {k_factors}x{k_factors} (k = loadings columns)"
+                )
+            }
+            UniverseError::InvalidSpecificVariance { index, value } => {
+                write!(
+                    f,
+                    "Specific variance at index {index} is {value}; must be finite and >= 0"
                 )
             }
             UniverseError::DuplicateAssetId(id) => {
@@ -171,6 +192,10 @@ impl UniverseBuilder {
     }
 
     /// Set a factor covariance model: Σ = B * F * Bᵀ + D.
+    ///
+    /// `loadings` is n×k, `factor_cov` is k×k, `specific_variance` has length n
+    /// with all entries ≥ 0. Like `covariance_full`, `factor_cov` must be stored
+    /// full-symmetric (both triangles); the compiler reads its upper triangle.
     pub fn covariance_factor(
         mut self,
         loadings: CscMatrix<f64>,
@@ -227,8 +252,8 @@ impl UniverseBuilder {
             }
             CovarianceModel::Factor {
                 loadings,
+                factor_cov,
                 specific_variance,
-                ..
             } => {
                 if loadings.m != n {
                     return Err(UniverseError::FactorDimensionMismatch {
@@ -241,6 +266,24 @@ impl UniverseBuilder {
                         n_assets: n,
                         loadings_rows: specific_variance.len(),
                     });
+                }
+                let k = loadings.n;
+                if factor_cov.m != k || factor_cov.n != k {
+                    return Err(UniverseError::FactorCovDimensionMismatch {
+                        k_factors: k,
+                        rows: factor_cov.m,
+                        cols: factor_cov.n,
+                    });
+                }
+                // Negative specific variance makes P indefinite and the solver
+                // fails with an opaque numerical error — reject it here.
+                for (i, &d) in specific_variance.iter().enumerate() {
+                    if !d.is_finite() || d < 0.0 {
+                        return Err(UniverseError::InvalidSpecificVariance {
+                            index: i,
+                            value: d,
+                        });
+                    }
                 }
             }
         }
@@ -335,6 +378,56 @@ mod tests {
             .build();
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_factor_model_valid() {
+        // 2 assets, 1 factor
+        let universe = Universe::builder()
+            .add_asset(Asset::new("A"))
+            .add_asset(Asset::new("B"))
+            .covariance_factor(
+                CscMatrix::from(&[[1.0], [0.8]]),
+                CscMatrix::from(&[[0.04]]),
+                vec![0.01, 0.02],
+            )
+            .build();
+        assert!(universe.is_ok());
+    }
+
+    #[test]
+    fn test_factor_cov_dimension_mismatch() {
+        // loadings is 2x1 (k=1) but factor_cov is 2x2
+        let result = Universe::builder()
+            .add_asset(Asset::new("A"))
+            .add_asset(Asset::new("B"))
+            .covariance_factor(
+                CscMatrix::from(&[[1.0], [0.8]]),
+                CscMatrix::from(&[[0.04, 0.0], [0.0, 0.02]]),
+                vec![0.01, 0.02],
+            )
+            .build();
+        assert!(matches!(
+            result,
+            Err(UniverseError::FactorCovDimensionMismatch { k_factors: 1, rows: 2, cols: 2 })
+        ));
+    }
+
+    #[test]
+    fn test_factor_negative_specific_variance() {
+        let result = Universe::builder()
+            .add_asset(Asset::new("A"))
+            .add_asset(Asset::new("B"))
+            .covariance_factor(
+                CscMatrix::from(&[[1.0], [0.8]]),
+                CscMatrix::from(&[[0.04]]),
+                vec![0.01, -0.02],
+            )
+            .build();
+        assert!(matches!(
+            result,
+            Err(UniverseError::InvalidSpecificVariance { index: 1, .. })
+        ));
     }
 
     #[test]
