@@ -26,6 +26,9 @@ struct ProblemSpec {
     factor_model: Option<FactorModelSpec>,
     strategy: StrategySpec,
     restrictions: RestrictionsSpec,
+    /// Return scenarios (S rows × n assets) for CVaR constraints.
+    #[serde(default)]
+    scenarios: Option<Vec<Vec<f64>>>,
     #[serde(default)]
     turnover: Option<TurnoverSpec>,
     /// When present, explore a Pareto frontier instead of a single solve.
@@ -52,6 +55,9 @@ struct BatchItemSpec {
     /// Sparse score overrides: asset id -> { score_key -> value }.
     #[serde(default)]
     scores: HashMap<String, HashMap<String, f64>>,
+    /// Per-item scenarios; falls back to the spec-level scenarios if omitted.
+    #[serde(default)]
+    scenarios: Option<Vec<Vec<f64>>>,
     #[serde(default)]
     turnover: Option<TurnoverSpec>,
 }
@@ -101,6 +107,23 @@ struct StrategySpec {
     groups: Vec<GroupSpec>,
     #[serde(default)]
     score_bounds: Vec<ScoreBoundSpec>,
+    #[serde(default)]
+    tracking_error: Option<TrackingErrorSpec>,
+    #[serde(default)]
+    cvar: Option<CvarSpec>,
+}
+
+#[derive(Deserialize)]
+struct TrackingErrorSpec {
+    /// Benchmark weights, ordered like `assets`.
+    benchmark: Vec<f64>,
+    max_te: f64,
+}
+
+#[derive(Deserialize)]
+struct CvarSpec {
+    alpha: f64,
+    max_cvar: f64,
 }
 
 #[derive(Deserialize)]
@@ -227,8 +250,12 @@ fn build_universe(
     covariance: &Option<Vec<Vec<f64>>>,
     factor_model: &Option<FactorModelSpec>,
     score_overrides: Option<&HashMap<String, HashMap<String, f64>>>,
+    scenarios: Option<&Vec<Vec<f64>>>,
 ) -> Result<Universe, String> {
     let mut ub = Universe::builder();
+    if let Some(s) = scenarios {
+        ub = ub.scenarios(s.clone());
+    }
     for a in assets {
         let mut asset = Asset::new(a.id.as_str());
         for (k, v) in &a.tags {
@@ -293,6 +320,7 @@ fn run(spec: ProblemSpec) -> Result<String, String> {
             &spec.covariance,
             &spec.factor_model,
             None,
+            spec.scenarios.as_ref(),
         )?)
     };
 
@@ -322,6 +350,12 @@ fn run(spec: ProblemSpec) -> Result<String, String> {
             "max" => sb.score_max(&s.score_key, s.threshold),
             other => return Err(format!("unknown score bound '{other}' (expected min|max)")),
         };
+    }
+    if let Some(te) = &spec.strategy.tracking_error {
+        sb = sb.max_tracking_error(te.benchmark.clone(), te.max_te);
+    }
+    if let Some(cvar) = &spec.strategy.cvar {
+        sb = sb.max_cvar(cvar.alpha, cvar.max_cvar);
     }
     // Fully-invested is controlled via restrictions in the demo spec.
     let strategy = sb.fully_invested(false).build();
@@ -364,7 +398,8 @@ fn run(spec: ProblemSpec) -> Result<String, String> {
                 } else {
                     (&spec.covariance, &spec.factor_model)
                 };
-                build_universe(&spec.assets, cov, fm, Some(&item.scores))
+                let scen = item.scenarios.as_ref().or(spec.scenarios.as_ref());
+                build_universe(&spec.assets, cov, fm, Some(&item.scores), scen)
             })
             .collect();
 

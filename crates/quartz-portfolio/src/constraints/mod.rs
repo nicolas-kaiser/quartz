@@ -1,15 +1,19 @@
 pub mod allocation;
 pub mod bounds;
+pub mod cvar;
 pub mod exclusion;
 pub mod factor;
 pub mod scoring;
+pub mod tracking;
 pub mod turnover;
 
 pub use allocation::{FullyInvested, GroupConstraint};
 pub use bounds::WeightBounds;
+pub use cvar::CvarConstraint;
 pub use exclusion::Exclusion;
 pub use factor::FactorLink;
 pub use scoring::{ScoreBound, ScoreConstraint};
+pub use tracking::TrackingErrorConstraint;
 pub use turnover::TurnoverConstraint;
 
 /// A triplet (row, col, value) for building sparse constraint matrices.
@@ -31,6 +35,10 @@ pub struct ConstraintContribution {
     pub n_equality: usize,
     /// Number of inequality rows (these go into NonnegativeConeT).
     pub n_inequality: usize,
+    /// Second-order cone block dimensions (each becomes a SecondOrderConeT).
+    /// SOC local rows follow the equality and inequality rows; the compiler
+    /// places all SOC blocks after every inequality row in the assembled A.
+    pub soc_blocks: Vec<usize>,
 }
 
 impl ConstraintContribution {
@@ -40,12 +48,13 @@ impl ConstraintContribution {
             b_entries: Vec::new(),
             n_equality: 0,
             n_inequality: 0,
+            soc_blocks: Vec::new(),
         }
     }
 
     /// Total number of constraint rows.
     pub fn n_rows(&self) -> usize {
-        self.n_equality + self.n_inequality
+        self.n_equality + self.n_inequality + self.soc_blocks.iter().sum::<usize>()
     }
 }
 

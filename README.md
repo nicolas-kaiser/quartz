@@ -37,10 +37,12 @@ Quartz is a **modeler + compiler**: it translates your high-level portfolio stra
 - **Strategy / Tactic / Restriction** — three-layer architecture separating long-term vision, short-term adjustments, and compliance rules
 - **Exclusion lists** — exclude by tag (sector = Tobacco) or by specific asset
 - **Turnover control** — limit total portfolio rebalancing with warm-start from previous weights
+- **Tracking error & CVaR limits** — `‖w − w_b‖_Σ ≤ TE` compiles to a second-order cone; scenario-based CVaR uses the Rockafellar–Uryasev linearization (`.max_tracking_error(...)`, `.max_cvar(...)`)
 - **Factor covariance models** — `Σ = BFBᵀ + D` compiles to a sparse QP with k auxiliary variables (O(nk²) instead of O(n²))
 - **Pareto frontier exploration** — sweep two dimensions against each other or enumerate a full simplex grid, with non-dominated filtering (`FrontierExplorer`)
 - **Parallel batch solving** — `solve_batch` runs independent problems on all cores via `rayon` (1000-date backtest in ~13 ms); opt out with `default-features = false`
 - **Python bindings** — `import quartz` (PyO3 + maturin); batch solves release the GIL and run rayon-parallel
+- **OSQP warm-start backend** (optional `osqp` feature) — sequential re-solves (turnover-chained backtests, live re-optimization) seed each solve with the previous solution: `.backend(Backend::Osqp).warm_start(&prev)`
 - **Pure Rust** — zero C/C++ dependencies, compiles anywhere Rust does
 - **~1ms solve time** — for typical 5-asset problems with full constraint sets
 
@@ -166,6 +168,9 @@ cargo run --example frontier -p quartz-portfolio
 
 # Parallel backtest: 1000 dates, serial vs parallel timing
 cargo run --release --example backtest -p quartz-portfolio
+
+# Sequential turnover-chained backtest: Clarabel vs OSQP cold vs OSQP warm-started
+cargo run --release --example backtest_warmstart -p quartz-portfolio --features osqp
 ```
 
 ## Python
@@ -209,7 +214,7 @@ cargo build          # Build all crates
 cargo test           # Run all tests (29 unit tests)
 ```
 
-Requires **Rust stable** (edition 2021). No C/C++ toolchain needed.
+Requires **Rust stable** (edition 2021). No C/C++ toolchain needed for the default build; the optional `osqp` feature vendors the OSQP C solver and needs cmake + a C compiler (`cargo test -p quartz-solver --features osqp`).
 
 ## Roadmap
 
@@ -217,8 +222,8 @@ Requires **Rust stable** (edition 2021). No C/C++ toolchain needed.
 - [x] Pareto frontier exploration (multi-objective trade-off visualization)
 - [x] Parallel batch solving with `rayon` (backtest 1000 dates in parallel)
 - [x] Python bindings via PyO3 + maturin
-- [ ] OSQP backend for warm-start support
-- [ ] SOCP support for CVaR and tracking error constraints
+- [x] OSQP backend for warm-start support
+- [x] SOCP support for CVaR and tracking error constraints
 - [ ] JSON/YAML strategy file loading
 
 ## License

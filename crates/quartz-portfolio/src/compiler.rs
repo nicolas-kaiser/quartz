@@ -26,6 +26,16 @@ pub enum CompileError {
     NoCovarianceForQuadratic,
     /// Turnover constraint dimension mismatch.
     TurnoverDimensionMismatch { expected: usize, got: usize },
+    /// A CVaR constraint requires scenarios on the universe.
+    CvarRequiresScenarios,
+    /// CVaR alpha must be in (0, 1) with a finite limit.
+    InvalidCvarAlpha(f64),
+    /// Tracking-error benchmark weights length mismatch.
+    BenchmarkDimensionMismatch { expected: usize, got: usize },
+    /// Tracking-error limit must be finite and positive.
+    InvalidTrackingErrorLimit(f64),
+    /// Covariance is not positive semidefinite (tracking error needs a Cholesky factor).
+    CholeskyFailure(String),
 }
 
 impl std::fmt::Display for CompileError {
@@ -41,6 +51,24 @@ impl std::fmt::Display for CompileError {
                     f,
                     "Turnover previous_weights length ({got}) != n_assets ({expected})"
                 )
+            }
+            CompileError::CvarRequiresScenarios => {
+                write!(f, "CVaR constraint requires return scenarios on the universe")
+            }
+            CompileError::InvalidCvarAlpha(a) => {
+                write!(f, "CVaR alpha must be in (0, 1) with a finite limit, got {a}")
+            }
+            CompileError::BenchmarkDimensionMismatch { expected, got } => {
+                write!(
+                    f,
+                    "Tracking-error benchmark has {got} weights, expected {expected} (one per asset)"
+                )
+            }
+            CompileError::InvalidTrackingErrorLimit(t) => {
+                write!(f, "Tracking-error limit must be finite and positive, got {t}")
+            }
+            CompileError::CholeskyFailure(msg) => {
+                write!(f, "Tracking error needs a PSD covariance: {msg}")
             }
         }
     }
@@ -75,12 +103,13 @@ pub fn compile(
         return Err(CompileError::NoDimensions);
     }
 
-    // Variable layout: [w (n), t (n, if turnover), y (k, if factor covariance)].
-    // The turnover constraint hardcodes t at columns n..2n, so y must come after t.
-    // y vars are only allocated when a quadratic dimension is present: a free
-    // variable appearing in no constraint and no objective can make the solver's
-    // KKT system singular. (Tactic merge can change dimension weights but never
-    // dimension types, so checking the strategy is sufficient.)
+    // Variable layout: [w (n), t (n, if turnover), y (k, if factor covariance),
+    // ζ+u (1+S, if CVaR)]. The turnover constraint hardcodes t at columns
+    // n..2n, so later blocks always come after it. y vars are only allocated
+    // when a quadratic dimension is present: a free variable appearing in no
+    // constraint and no objective can make the solver's KKT system singular.
+    // (Tactic merge can change dimension weights but never dimension types or
+    // the risk constraints, so checking the strategy is sufficient.)
     let has_quadratic = strategy
         .dimensions
         .iter()
@@ -91,7 +120,34 @@ pub fn compile(
         _ => 0,
     };
     let y_offset = n + n_turnover;
-    let n_aux = n_turnover + k_factors;
+
+    // Validate risk constraints and size the CVaR aux block
+    if let Some(te) = &strategy.tracking_error {
+        if te.benchmark_weights.len() != n {
+            return Err(CompileError::BenchmarkDimensionMismatch {
+                expected: n,
+                got: te.benchmark_weights.len(),
+            });
+        }
+        if !te.max_te.is_finite() || te.max_te <= 0.0 {
+            return Err(CompileError::InvalidTrackingErrorLimit(te.max_te));
+        }
+    }
+    let n_cvar = match &strategy.cvar {
+        Some(c) => {
+            if !(c.alpha > 0.0 && c.alpha < 1.0) || !c.max_cvar.is_finite() {
+                return Err(CompileError::InvalidCvarAlpha(c.alpha));
+            }
+            let scenarios = universe
+                .scenarios
+                .as_ref()
+                .ok_or(CompileError::CvarRequiresScenarios)?;
+            crate::constraints::CvarConstraint::n_aux(scenarios.len())
+        }
+        None => 0,
+    };
+    let cvar_offset = n + n_turnover + k_factors;
+    let n_aux = n_turnover + k_factors + n_cvar;
     let n_vars = n + n_aux;
 
     // Validate turnover dimensions
@@ -171,12 +227,32 @@ pub fn compile(
         }
     }
 
+    // 4h: CVaR rows (pure inequalities, using aux columns at cvar_offset)
+    if let Some(cvar) = &merged.cvar {
+        let scenarios = universe
+            .scenarios
+            .as_ref()
+            .expect("validated above: CVaR requires scenarios");
+        ineq_contributions.push(cvar.compile(scenarios, cvar_offset));
+    }
+
+    // 4i: Tracking error (second-order cone rows, placed after all inequalities)
+    let mut soc_contributions: Vec<ConstraintContribution> = Vec::new();
+    if let Some(te) = &merged.tracking_error {
+        soc_contributions.push(
+            te.compile(&universe.covariance)
+                .map_err(|e| CompileError::CholeskyFailure(e.to_string()))?,
+        );
+    }
+
     // Step 5: Assemble A and b matrices
     //
-    // Row ordering: all equalities first (ZeroConeT), then all inequalities (NonnegativeConeT).
+    // Row ordering: all equalities first (ZeroConeT), then all inequalities
+    // (NonnegativeConeT), then second-order cone blocks in order.
     let total_eq: usize = eq_contributions.iter().map(|c| c.n_equality).sum();
     let total_ineq: usize = ineq_contributions.iter().map(|c| c.n_inequality).sum();
-    let m = total_eq + total_ineq;
+    let total_soc: usize = soc_contributions.iter().map(|c| c.n_rows()).sum();
+    let m = total_eq + total_ineq + total_soc;
 
     let mut a_rows = Vec::new();
     let mut a_cols = Vec::new();
@@ -206,6 +282,17 @@ pub fn compile(
         row_offset += contrib.n_rows();
     }
 
+    // Then SOC blocks (rows and cones in the same iteration order)
+    for contrib in &soc_contributions {
+        for t in &contrib.triplets {
+            a_rows.push(row_offset + t.row);
+            a_cols.push(t.col);
+            a_vals.push(t.val);
+        }
+        b.extend_from_slice(&contrib.b_entries);
+        row_offset += contrib.n_rows();
+    }
+
     let a = CscMatrix::new_from_triplets(m, n_vars, a_rows, a_cols, a_vals);
 
     // Step 6: Build cones
@@ -215,6 +302,11 @@ pub fn compile(
     }
     if total_ineq > 0 {
         cones.push(SupportedConeT::NonnegativeConeT(total_ineq));
+    }
+    for contrib in &soc_contributions {
+        for &dim in &contrib.soc_blocks {
+            cones.push(SupportedConeT::SecondOrderConeT(dim));
+        }
     }
 
     Ok(CompiledProblem {
@@ -517,6 +609,153 @@ mod tests {
     }
 
     #[test]
+    fn test_compile_tracking_error_soc() {
+        let universe = test_universe();
+        let strategy = Strategy::builder("TE")
+            .minimize_risk(0.5)
+            .maximize("expected_return", 0.5)
+            .max_tracking_error(vec![0.4, 0.3, 0.3], 0.05)
+            .build();
+        let restrictions = Restrictions::builder().long_only().fully_invested().build();
+
+        let problem = compile(&universe, &strategy, None, &restrictions, None).unwrap();
+
+        // 1 eq + 3 ineq (long only) + SOC(n+1 = 4)
+        assert_eq!(problem.b.len(), 1 + 3 + 4);
+        assert_eq!(problem.n_aux, 0); // TE adds rows, not variables
+        assert!(matches!(problem.cones[0], SupportedConeT::ZeroConeT(1)));
+        assert!(matches!(problem.cones[1], SupportedConeT::NonnegativeConeT(3)));
+        assert!(matches!(problem.cones[2], SupportedConeT::SecondOrderConeT(4)));
+        // SOC s0 row: b = max_te at the first SOC row
+        assert_eq!(problem.b[4], 0.05);
+    }
+
+    #[test]
+    fn test_compile_tracking_error_factor_soc() {
+        let universe = factor_universe(); // 3 assets, 2 factors
+        let strategy = Strategy::builder("TE")
+            .minimize_risk(1.0)
+            .max_tracking_error(vec![0.4, 0.3, 0.3], 0.05)
+            .build();
+        let restrictions = Restrictions::builder().long_only().fully_invested().build();
+
+        let problem = compile(&universe, &strategy, None, &restrictions, None).unwrap();
+
+        // SOC dim = 1 + k + n = 6
+        assert!(problem
+            .cones
+            .iter()
+            .any(|c| matches!(c, SupportedConeT::SecondOrderConeT(6))));
+    }
+
+    #[test]
+    fn test_compile_cvar_aux_layout() {
+        let universe = Universe::builder()
+            .add_asset(Asset::new("A").score("expected_return", 0.10))
+            .add_asset(Asset::new("B").score("expected_return", 0.05))
+            .add_asset(Asset::new("C").score("expected_return", 0.03))
+            .covariance_full(CscMatrix::from(&[
+                [0.04, 0.006, 0.002],
+                [0.006, 0.09, 0.009],
+                [0.002, 0.009, 0.01],
+            ]))
+            .scenarios(vec![
+                vec![0.01, 0.02, -0.01],
+                vec![-0.03, 0.01, 0.00],
+                vec![0.02, -0.02, 0.01],
+                vec![0.00, 0.01, 0.02],
+            ])
+            .build()
+            .unwrap();
+        let strategy = Strategy::builder("CVaR")
+            .minimize_risk(0.5)
+            .maximize("expected_return", 0.5)
+            .max_cvar(0.75, 0.02)
+            .build();
+        let restrictions = Restrictions::builder().long_only().fully_invested().build();
+        let turnover = TurnoverConstraint::new(vec![0.4, 0.3, 0.3], 0.20);
+
+        let problem =
+            compile(&universe, &strategy, None, &restrictions, Some(&turnover)).unwrap();
+
+        // aux = 3 turnover t + (1 + 4) cvar; S=4 scenarios
+        assert_eq!(problem.n_aux, 3 + 5);
+        assert_eq!(problem.n_vars(), 11);
+        // 1 eq + 3 long-only + 10 turnover + (2*4+1) cvar = 23 rows
+        assert_eq!(problem.b.len(), 1 + 3 + 10 + 9);
+        // No SOC cones for CVaR
+        assert!(!problem
+            .cones
+            .iter()
+            .any(|c| matches!(c, SupportedConeT::SecondOrderConeT(_))));
+    }
+
+    #[test]
+    fn test_compile_risk_constraint_errors() {
+        let universe = test_universe();
+        let restrictions = Restrictions::default();
+
+        // CVaR without scenarios
+        let s = Strategy::builder("X").minimize_risk(1.0).max_cvar(0.95, 0.02).build();
+        assert!(matches!(
+            compile(&universe, &s, None, &restrictions, None),
+            Err(CompileError::CvarRequiresScenarios)
+        ));
+
+        // Bad benchmark length
+        let s = Strategy::builder("X")
+            .minimize_risk(1.0)
+            .max_tracking_error(vec![1.0], 0.05)
+            .build();
+        assert!(matches!(
+            compile(&universe, &s, None, &restrictions, None),
+            Err(CompileError::BenchmarkDimensionMismatch { expected: 3, got: 1 })
+        ));
+
+        // Bad TE limit
+        let s = Strategy::builder("X")
+            .minimize_risk(1.0)
+            .max_tracking_error(vec![0.4, 0.3, 0.3], 0.0)
+            .build();
+        assert!(matches!(
+            compile(&universe, &s, None, &restrictions, None),
+            Err(CompileError::InvalidTrackingErrorLimit(_))
+        ));
+
+        // Bad alpha
+        let s = Strategy::builder("X").minimize_risk(1.0).max_cvar(1.5, 0.02).build();
+        assert!(matches!(
+            compile(&universe, &s, None, &restrictions, None),
+            Err(CompileError::InvalidCvarAlpha(_))
+        ));
+    }
+
+    #[test]
+    fn test_strategy_serde_compat() {
+        // Old JSON without the new fields must still deserialize
+        let old_json = r#"{
+            "name": "Old",
+            "dimensions": [],
+            "group_constraints": [],
+            "score_constraints": [],
+            "fully_invested": true
+        }"#;
+        let s: Strategy = serde_json::from_str(old_json).unwrap();
+        assert!(s.tracking_error.is_none() && s.cvar.is_none());
+
+        // Round trip with the fields set
+        let s = Strategy::builder("New")
+            .minimize_risk(1.0)
+            .max_tracking_error(vec![0.5, 0.5, 0.0], 0.03)
+            .max_cvar(0.95, 0.02)
+            .build();
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Strategy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tracking_error.unwrap().max_te, 0.03);
+        assert_eq!(back.cvar.unwrap().alpha, 0.95);
+    }
+
+    #[test]
     fn test_compile_no_dimensions_error() {
         let universe = test_universe();
         let strategy = Strategy {
@@ -525,6 +764,8 @@ mod tests {
             group_constraints: vec![],
             score_constraints: vec![],
             fully_invested: true,
+            tracking_error: None,
+            cvar: None,
         };
         let restrictions = Restrictions::default();
 

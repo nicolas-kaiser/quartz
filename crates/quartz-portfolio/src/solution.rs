@@ -20,6 +20,11 @@ pub struct PortfolioSolution {
     pub solve_time_s: f64,
     /// Number of solver iterations.
     pub iterations: u32,
+    /// Full primal vector `[w, t?, y_factor?]` including auxiliary variables.
+    /// Feed into `PortfolioModel::warm_start` to seed the next solve.
+    pub raw_x: Vec<f64>,
+    /// Full dual vector (same sign convention on all backends).
+    pub raw_z: Vec<f64>,
 }
 
 impl PortfolioSolution {

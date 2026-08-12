@@ -41,6 +41,17 @@ pub enum Matrix<'py> {
 }
 
 impl Matrix<'_> {
+    /// Dense row-major rows (for scenario matrices).
+    pub fn to_dense_rows(&self) -> PyResult<Vec<Vec<f64>>> {
+        match self {
+            Matrix::Array(a) => {
+                let view = a.as_array();
+                Ok(view.rows().into_iter().map(|r| r.to_vec()).collect())
+            }
+            Matrix::Rows(rows) => Ok(rows.clone()),
+        }
+    }
+
     pub fn to_csc(&self) -> PyResult<CscMatrix<f64>> {
         match self {
             Matrix::Array(a) => {

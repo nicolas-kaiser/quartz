@@ -49,7 +49,7 @@ def load_data():
     returns = prices.pct_change().dropna()
     cov = returns.cov() * TRADING_DAYS  # annualized covariance
     exp_ret = returns.mean() * TRADING_DAYS  # annualized expected return
-    return prices, assets, cov, exp_ret
+    return prices, assets, cov, exp_ret, returns
 
 
 def pca_factor_model(cov: pd.DataFrame, k: int):
@@ -71,7 +71,8 @@ def pca_factor_model(cov: pd.DataFrame, k: int):
 # The app keeps building a JSON-like spec dict (it drives the UI and the
 # "spec JSON" expander); these helpers interpret it with the quartz bindings
 # and return the same dict shapes the old subprocess bridge produced.
-def _build_universe(asset_specs, covariance=None, factor_model=None, score_overrides=None):
+def _build_universe(asset_specs, covariance=None, factor_model=None, score_overrides=None,
+                    scenarios=None):
     assets = []
     for a in asset_specs:
         scores = dict(a["scores"])
@@ -84,8 +85,8 @@ def _build_universe(asset_specs, covariance=None, factor_model=None, score_overr
             factor_model["factor_cov"],
             factor_model["specific_variance"],
         )
-        return quartz.Universe(assets=assets, factor_model=fm)
-    return quartz.Universe(assets=assets, covariance=covariance)
+        return quartz.Universe(assets=assets, factor_model=fm, scenarios=scenarios)
+    return quartz.Universe(assets=assets, covariance=covariance, scenarios=scenarios)
 
 
 def _build_strategy(sspec: dict):
@@ -104,6 +105,11 @@ def _build_strategy(sspec: dict):
             s = s.score_min(b["score_key"], b["threshold"])
         else:
             s = s.score_max(b["score_key"], b["threshold"])
+    if "tracking_error" in sspec:
+        te = sspec["tracking_error"]
+        s = s.max_tracking_error(te["benchmark"], te["max_te"])
+    if "cvar" in sspec:
+        s = s.max_cvar(sspec["cvar"]["alpha"], sspec["cvar"]["max_cvar"])
     # Fully-invested is controlled via restrictions in the demo spec.
     return s.fully_invested(False)
 
@@ -145,8 +151,9 @@ def solve(spec: dict) -> dict:
                 fm = item.get("factor_model")
                 if cov is None and fm is None:
                     cov, fm = spec.get("covariance"), spec.get("factor_model")
+                scen = item.get("scenarios", spec.get("scenarios"))
                 try:
-                    u = _build_universe(spec["assets"], cov, fm, item.get("scores"))
+                    u = _build_universe(spec["assets"], cov, fm, item.get("scores"), scen)
                     problems.append(quartz.Problem(u, strategy, restrictions=restrictions))
                 except quartz.QuartzError as e:
                     build_errors[i] = str(e)
@@ -174,7 +181,8 @@ def solve(spec: dict) -> dict:
             }
 
         universe = _build_universe(
-            spec["assets"], spec.get("covariance"), spec.get("factor_model")
+            spec["assets"], spec.get("covariance"), spec.get("factor_model"),
+            scenarios=spec.get("scenarios"),
         )
 
         if "frontier" in spec:
@@ -228,7 +236,7 @@ if not (DATA_DIR / "prices.csv").exists():
     )
     st.stop()
 
-prices, assets, cov, exp_ret = load_data()
+prices, assets, cov, exp_ret, returns = load_data()
 tickers = list(prices.columns)
 
 st.title("🔷 Quartz — Multi-Dimensional Portfolio Optimizer")
@@ -284,6 +292,17 @@ max_trans = st.sidebar.slider("Max transition risk (10 = off)", 0.0, 10.0, 10.0,
 if max_trans < 10:
     score_bounds.append({"score_key": "transition_risk", "bound": "max", "threshold": max_trans})
 
+st.sidebar.header("Risk constraints")
+use_te = st.sidebar.checkbox("Max tracking error vs equal-weight benchmark")
+max_te = 0.05
+if use_te:
+    max_te = st.sidebar.slider("Max TE (annualized)", 0.01, 0.25, 0.05, 0.01)
+use_cvar = st.sidebar.checkbox("Max CVaR (scenario-based)")
+cvar_alpha, max_cvar = 0.95, 0.02
+if use_cvar:
+    cvar_alpha = st.sidebar.selectbox("CVaR confidence α", [0.90, 0.95, 0.99], index=1)
+    max_cvar = st.sidebar.slider("Max CVaR (daily loss)", 0.005, 0.05, 0.02, 0.005)
+
 st.sidebar.header("Restrictions")
 long_only = st.sidebar.checkbox("Long only", value=True)
 max_weight = st.sidebar.slider("Max weight per asset", 0.05, 1.0, 0.30, 0.05)
@@ -338,6 +357,13 @@ spec = {
     },
 }
 
+if use_te:
+    equal_weight = [1.0 / len(tickers)] * len(tickers)
+    spec["strategy"]["tracking_error"] = {"benchmark": equal_weight, "max_te": max_te}
+if use_cvar:
+    spec["strategy"]["cvar"] = {"alpha": cvar_alpha, "max_cvar": max_cvar}
+    spec["scenarios"] = returns.tail(500)[tickers].values.tolist()
+
 cov_ordered = cov.loc[tickers, tickers]
 if use_factor:
     loadings, factor_cov, specific = pca_factor_model(cov_ordered, n_factors)
@@ -390,6 +416,22 @@ with tab_opt:
     c2.metric("Volatility (ann.)", f"{np.sqrt(max(variance, 0)) * 100:.2f}%")
     c3.metric("Solve time", f"{result['solve_time_s'] * 1000:.2f} ms")
     c4.metric("Iterations", result["iterations"])
+
+    if "tracking_error" in scores or "cvar" in scores:
+        r1, r2, _, _ = st.columns(4)
+        if "tracking_error" in scores:
+            r1.metric(
+                "Tracking error (ann.)",
+                f"{scores['tracking_error'] * 100:.2f}%",
+                help=f"vs equal-weight benchmark, limit {max_te * 100:.0f}%",
+            )
+        if "cvar" in scores:
+            r2.metric(
+                f"CVaR {cvar_alpha:.0%} (daily)",
+                f"{scores['cvar'] * 100:.2f}%",
+                help=f"expected loss over the worst {1 - cvar_alpha:.0%} of the last "
+                f"{len(spec.get('scenarios', []))} days, limit {max_cvar * 100:.1f}%",
+            )
 
     col_w, col_pie = st.columns([3, 2])
     with col_w:
@@ -585,8 +627,16 @@ with tab_backtest:
                 item["covariance"] = win_cov.values.tolist()
             items.append(item)
 
-        batch_spec = {k: v for k, v in spec.items() if k != "frontier"}
+        # v1: risk constraints (TE/CVaR) apply to the Optimize and Frontier
+        # tabs; the backtest solves each date without them.
+        batch_spec = {k: v for k, v in spec.items() if k not in ("frontier", "scenarios")}
+        batch_spec["strategy"] = {
+            k: v for k, v in spec["strategy"].items() if k not in ("tracking_error", "cvar")
+        }
         batch_spec["batch"] = {"items": items}
+        if use_te or use_cvar:
+            st.caption("Note: the TE/CVaR risk constraints apply to the Optimize "
+                       "and Pareto Frontier tabs, not to the backtest.")
         bresult = solve(batch_spec)
 
         if "error" in bresult:

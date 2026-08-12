@@ -1,6 +1,40 @@
 use clarabel::algebra::CscMatrix;
 use clarabel::solver::{self as cl, DefaultSettings, DefaultSettingsBuilder, IPSolver};
 
+#[cfg(feature = "osqp")]
+mod osqp_backend;
+
+/// Which QP solver to use.
+///
+/// - `Clarabel` (default): interior-point, high accuracy, pure Rust. Cannot
+///   exploit warm starts — every solve starts from scratch.
+/// - `Osqp` (cargo feature `osqp`): ADMM first-order method wrapping the OSQP
+///   C library. Supports warm starting: seeding a solve with the previous
+///   primal/dual pair makes near-identical consecutive problems (sequential
+///   backtest dates, adjacent frontier points) converge in far fewer
+///   iterations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Backend {
+    #[default]
+    Clarabel,
+    #[cfg(feature = "osqp")]
+    Osqp,
+}
+
+/// A warm-start hint: the primal/dual solution of a previous, similar problem.
+///
+/// `x` must have length n_vars of the new problem, `y` length m (or empty to
+/// seed only the primal). Both backends accept the hint; Clarabel ignores it
+/// (interior-point methods cannot use one), OSQP errors on a length mismatch —
+/// that means the caller chained solutions across structurally different
+/// problems (e.g. turnover or factor aux variables added/removed).
+#[derive(Debug, Clone)]
+pub struct WarmStart {
+    pub x: Vec<f64>,
+    pub y: Vec<f64>,
+}
+
 /// A compiled QP/conic problem ready to be solved.
 ///
 /// Represents: min (1/2)xᵀPx + qᵀx  s.t. Ax + s = b, s ∈ K
@@ -83,8 +117,59 @@ impl Default for SolverSettings {
     }
 }
 
-/// Solve a compiled QP/conic problem using Clarabel.
+impl SolverSettings {
+    /// Backend-appropriate defaults.
+    ///
+    /// Clarabel (interior-point) converges to 1e-8 in ~10 iterations; OSQP
+    /// (ADMM) needs thousands of cheap iterations for tight tolerances, so it
+    /// gets 1e-5 tolerances with generous iteration headroom — solution
+    /// polishing then recovers high accuracy. Passing Clarabel-tuned settings
+    /// (max_iter 200, tol 1e-8) to OSQP is legal but usually ends in
+    /// `MaxIterations`.
+    pub fn default_for(backend: Backend) -> Self {
+        match backend {
+            Backend::Clarabel => Self::default(),
+            #[cfg(feature = "osqp")]
+            Backend::Osqp => Self {
+                verbose: false,
+                max_iter: 20_000,
+                tol_gap_abs: 1e-6,
+                tol_gap_rel: 1e-6,
+                tol_feas: 1e-7,
+            },
+        }
+    }
+}
+
+/// Solve a compiled QP with the default backend (Clarabel), no warm start.
 pub fn solve_qp(
+    problem: &CompiledProblem,
+    settings: &SolverSettings,
+) -> Result<RawSolution, SolverError> {
+    solve_qp_with(problem, settings, Backend::Clarabel, None)
+}
+
+/// Solve a compiled QP with an explicit backend and optional warm start.
+///
+/// The warm-start hint is ignored by Clarabel (with no error) so callers can
+/// stay backend-generic; under OSQP a dimension mismatch is a hard error.
+pub fn solve_qp_with(
+    problem: &CompiledProblem,
+    settings: &SolverSettings,
+    backend: Backend,
+    warm_start: Option<&WarmStart>,
+) -> Result<RawSolution, SolverError> {
+    match backend {
+        Backend::Clarabel => {
+            let _ = warm_start; // interior-point: cannot use a warm start
+            solve_clarabel(problem, settings)
+        }
+        #[cfg(feature = "osqp")]
+        Backend::Osqp => osqp_backend::solve(problem, settings, warm_start),
+    }
+}
+
+fn solve_clarabel(
     problem: &CompiledProblem,
     settings: &SolverSettings,
 ) -> Result<RawSolution, SolverError> {
@@ -127,12 +212,21 @@ pub fn solve_qp(
 #[derive(Debug, Clone)]
 pub enum SolverError {
     Settings(String),
+    /// Warm-start vectors don't match the problem dimensions.
+    WarmStart(String),
+    /// The problem uses cones the selected backend cannot express.
+    Unsupported(String),
+    /// Backend problem setup failed.
+    Setup(String),
 }
 
 impl std::fmt::Display for SolverError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SolverError::Settings(msg) => write!(f, "Solver settings error: {msg}"),
+            SolverError::WarmStart(msg) => write!(f, "Warm start error: {msg}"),
+            SolverError::Unsupported(msg) => write!(f, "Unsupported problem: {msg}"),
+            SolverError::Setup(msg) => write!(f, "Solver setup error: {msg}"),
         }
     }
 }

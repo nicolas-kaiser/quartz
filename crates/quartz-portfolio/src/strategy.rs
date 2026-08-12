@@ -1,7 +1,7 @@
 use quartz_core::{Dimension, DimensionType, Sense};
 use serde::{Deserialize, Serialize};
 
-use crate::constraints::{GroupConstraint, ScoreConstraint};
+use crate::constraints::{CvarConstraint, GroupConstraint, ScoreConstraint, TrackingErrorConstraint};
 
 /// A portfolio strategy: the long-term investment approach.
 ///
@@ -14,6 +14,12 @@ pub struct Strategy {
     pub group_constraints: Vec<GroupConstraint>,
     pub score_constraints: Vec<ScoreConstraint>,
     pub fully_invested: bool,
+    /// Optional tracking-error limit vs a benchmark (SOC constraint).
+    #[serde(default)]
+    pub tracking_error: Option<TrackingErrorConstraint>,
+    /// Optional CVaR limit over the universe's return scenarios.
+    #[serde(default)]
+    pub cvar: Option<CvarConstraint>,
 }
 
 impl Strategy {
@@ -24,6 +30,8 @@ impl Strategy {
             group_constraints: Vec::new(),
             score_constraints: Vec::new(),
             fully_invested: true,
+            tracking_error: None,
+            cvar: None,
         }
     }
 }
@@ -36,6 +44,8 @@ pub struct StrategyBuilder {
     group_constraints: Vec<GroupConstraint>,
     score_constraints: Vec<ScoreConstraint>,
     fully_invested: bool,
+    tracking_error: Option<TrackingErrorConstraint>,
+    cvar: Option<CvarConstraint>,
 }
 
 impl StrategyBuilder {
@@ -104,6 +114,22 @@ impl StrategyBuilder {
         self
     }
 
+    /// Limit tracking error vs a benchmark: ‖w − w_b‖_Σ ≤ max_te.
+    /// `benchmark_weights` is ordered by universe index; `max_te` is in the
+    /// covariance's units (e.g. annualized volatility).
+    pub fn max_tracking_error(mut self, benchmark_weights: Vec<f64>, max_te: f64) -> Self {
+        self.tracking_error = Some(TrackingErrorConstraint::new(benchmark_weights, max_te));
+        self
+    }
+
+    /// Limit CVaR at confidence `alpha` (e.g. 0.95 = expected loss over the
+    /// worst 5% of the universe's return scenarios) to `max_cvar`, in the
+    /// scenarios' return units.
+    pub fn max_cvar(mut self, alpha: f64, max_cvar: f64) -> Self {
+        self.cvar = Some(CvarConstraint::new(alpha, max_cvar));
+        self
+    }
+
     /// Build the strategy. Normalizes dimension weights to sum to 1.0.
     pub fn build(mut self) -> Strategy {
         // Normalize dimension weights
@@ -120,6 +146,8 @@ impl StrategyBuilder {
             group_constraints: self.group_constraints,
             score_constraints: self.score_constraints,
             fully_invested: self.fully_invested,
+            tracking_error: self.tracking_error,
+            cvar: self.cvar,
         }
     }
 }

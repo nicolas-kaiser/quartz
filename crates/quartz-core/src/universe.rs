@@ -45,6 +45,15 @@ pub enum UniverseError {
         asset_id: String,
         score_key: String,
     },
+    ScenarioDimensionMismatch {
+        row: usize,
+        len: usize,
+        expected: usize,
+    },
+    InvalidScenarioValue {
+        row: usize,
+        col: usize,
+    },
 }
 
 impl std::fmt::Display for UniverseError {
@@ -91,6 +100,18 @@ impl std::fmt::Display for UniverseError {
                     "Invalid score (NaN or infinite) for asset {asset_id}, key {score_key}"
                 )
             }
+            UniverseError::ScenarioDimensionMismatch { row, len, expected } => {
+                write!(
+                    f,
+                    "Scenario row {row} has {len} entries, expected {expected} (one per asset)"
+                )
+            }
+            UniverseError::InvalidScenarioValue { row, col } => {
+                write!(
+                    f,
+                    "Scenario value at row {row}, col {col} is NaN or infinite"
+                )
+            }
         }
     }
 }
@@ -102,6 +123,9 @@ impl std::error::Error for UniverseError {}
 pub struct Universe {
     pub assets: Vec<Asset>,
     pub covariance: CovarianceModel,
+    /// Optional return scenarios (S rows × n assets, one row per period),
+    /// used by scenario-based constraints such as CVaR.
+    pub scenarios: Option<Vec<Vec<f64>>>,
 }
 
 impl Universe {
@@ -165,6 +189,7 @@ impl Universe {
 pub struct UniverseBuilder {
     assets: Vec<Asset>,
     covariance: Option<CovarianceModel>,
+    scenarios: Option<Vec<Vec<f64>>>,
 }
 
 impl UniverseBuilder {
@@ -172,7 +197,15 @@ impl UniverseBuilder {
         Self {
             assets: Vec::new(),
             covariance: None,
+            scenarios: None,
         }
+    }
+
+    /// Attach return scenarios (S rows × n assets, one row per period) for
+    /// scenario-based constraints such as CVaR.
+    pub fn scenarios(mut self, scenarios: Vec<Vec<f64>>) -> Self {
+        self.scenarios = Some(scenarios);
+        self
     }
 
     pub fn add_asset(mut self, asset: Asset) -> Self {
@@ -288,9 +321,35 @@ impl UniverseBuilder {
             }
         }
 
+        // Validate scenarios
+        if let Some(scenarios) = &self.scenarios {
+            if scenarios.is_empty() {
+                return Err(UniverseError::ScenarioDimensionMismatch {
+                    row: 0,
+                    len: 0,
+                    expected: n,
+                });
+            }
+            for (row, r) in scenarios.iter().enumerate() {
+                if r.len() != n {
+                    return Err(UniverseError::ScenarioDimensionMismatch {
+                        row,
+                        len: r.len(),
+                        expected: n,
+                    });
+                }
+                for (col, &v) in r.iter().enumerate() {
+                    if !v.is_finite() {
+                        return Err(UniverseError::InvalidScenarioValue { row, col });
+                    }
+                }
+            }
+        }
+
         Ok(Universe {
             assets: self.assets,
             covariance,
+            scenarios: self.scenarios,
         })
     }
 }
@@ -428,6 +487,26 @@ mod tests {
             result,
             Err(UniverseError::InvalidSpecificVariance { index: 1, .. })
         ));
+    }
+
+    #[test]
+    fn test_scenarios_validation() {
+        let base = || {
+            Universe::builder()
+                .add_asset(Asset::new("A"))
+                .add_asset(Asset::new("B"))
+                .covariance_full(CscMatrix::from(&[[0.04, 0.0], [0.0, 0.01]]))
+        };
+        assert!(base().scenarios(vec![vec![0.01, -0.02], vec![0.0, 0.03]]).build().is_ok());
+        assert!(matches!(
+            base().scenarios(vec![vec![0.01]]).build(),
+            Err(UniverseError::ScenarioDimensionMismatch { row: 0, len: 1, expected: 2 })
+        ));
+        assert!(matches!(
+            base().scenarios(vec![vec![0.01, f64::NAN]]).build(),
+            Err(UniverseError::InvalidScenarioValue { row: 0, col: 1 })
+        ));
+        assert!(base().scenarios(vec![]).build().is_err());
     }
 
     #[test]

@@ -51,6 +51,10 @@ price paths and says so.
 - **Group constraints** — min/max allocation per currency or sector
 - **Portfolio score bounds** — e.g. average environmental score ≥ 7
 - **Restrictions** — long-only, max weight per asset, exclusions by asset or sector
+- **Risk constraints** — max tracking error vs an equal-weight benchmark
+  (annualized, compiled as a second-order cone) and max CVaR over the last
+  500 daily return scenarios (daily-loss units, Rockafellar–Uryasev); both
+  apply to the Optimize and Pareto Frontier tabs
 - **Pareto Frontier tab** — sweep any two objectives against each other
   (e.g. volatility vs expected return); dominated points shown grey, the
   efficient frontier connected, with your current strategy marked on the chart

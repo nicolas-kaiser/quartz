@@ -8,3 +8,9 @@ description = "Thin solver wrapper for Quartz portfolio optimizer"
 [dependencies]
 clarabel = { workspace = true }
 quartz-core = { path = "../quartz-core" }
+# Optional OSQP backend: vendors the OSQP C solver (needs cmake + a C
+# compiler). Off by default so the default build stays pure Rust.
+osqp = { workspace = true, optional = true }
+
+[features]
+osqp = ["dep:osqp"]

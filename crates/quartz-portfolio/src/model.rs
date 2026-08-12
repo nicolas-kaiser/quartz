@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use quartz_core::{DimensionType, Universe};
-use quartz_solver::{self, SolverSettings};
+use quartz_solver::{self, Backend, SolverSettings, WarmStart};
 
 use crate::compiler::{self, CompileError};
 use crate::constraints::TurnoverConstraint;
@@ -56,6 +56,8 @@ pub struct PortfolioModel<'a> {
     restrictions: Restrictions,
     turnover: Option<TurnoverConstraint>,
     solver_settings: SolverSettings,
+    backend: Backend,
+    warm_start: Option<WarmStart>,
 }
 
 impl<'a> PortfolioModel<'a> {
@@ -67,6 +69,8 @@ impl<'a> PortfolioModel<'a> {
             restrictions: Restrictions::default(),
             turnover: None,
             solver_settings: SolverSettings::default(),
+            backend: Backend::default(),
+            warm_start: None,
         }
     }
 
@@ -100,6 +104,25 @@ impl<'a> PortfolioModel<'a> {
         self
     }
 
+    /// Select the QP solver backend. When using OSQP, pair with
+    /// `SolverSettings::default_for(Backend::Osqp)` — Clarabel-tuned settings
+    /// (max_iter 200, tol 1e-8) usually end in `MaxIterations` under ADMM.
+    pub fn backend(mut self, backend: Backend) -> Self {
+        self.backend = backend;
+        self
+    }
+
+    /// Seed the solver with a previous solution of a structurally identical
+    /// problem (same universe size, same turnover/factor setup). Only OSQP
+    /// can exploit the hint; Clarabel accepts and ignores it.
+    pub fn warm_start(mut self, previous: &PortfolioSolution) -> Self {
+        self.warm_start = Some(WarmStart {
+            x: previous.raw_x.clone(),
+            y: previous.raw_z.clone(),
+        });
+        self
+    }
+
     /// Compile, solve, and return the enriched portfolio solution.
     pub fn solve(self) -> Result<PortfolioSolution, PortfolioError> {
         let strategy = self.strategy.ok_or(PortfolioError::Compile(
@@ -118,7 +141,12 @@ impl<'a> PortfolioModel<'a> {
         let n = problem.n_assets;
 
         // Solve
-        let raw = quartz_solver::solve_qp(&problem, &self.solver_settings)?;
+        let raw = quartz_solver::solve_qp_with(
+            &problem,
+            &self.solver_settings,
+            self.backend,
+            self.warm_start.as_ref(),
+        )?;
 
         // Extract asset weights (first n entries)
         let weights_vec: Vec<f64> = raw.x[..n].to_vec();
@@ -156,6 +184,26 @@ impl<'a> PortfolioModel<'a> {
             portfolio_scores.insert("financial_risk".to_string(), variance);
         }
 
+        // Ex-post risk-constraint values, gated on constraint presence only
+        // (unlike financial_risk, which is gated on the quadratic dimension)
+        if let Some(te) = &strategy.tracking_error {
+            let diff: Vec<f64> = weights_vec
+                .iter()
+                .zip(&te.benchmark_weights)
+                .map(|(w, b)| w - b)
+                .collect();
+            let te_val = compute_portfolio_variance(self.universe, &diff).max(0.0).sqrt();
+            portfolio_scores.insert("tracking_error".to_string(), te_val);
+        }
+        if let Some(cvar) = &strategy.cvar {
+            if let Some(scenarios) = &self.universe.scenarios {
+                portfolio_scores.insert(
+                    "cvar".to_string(),
+                    compute_cvar(scenarios, &weights_vec, cvar.alpha),
+                );
+            }
+        }
+
         Ok(PortfolioSolution {
             status: raw.status,
             weights,
@@ -164,8 +212,33 @@ impl<'a> PortfolioModel<'a> {
             objective_value: raw.obj_val,
             solve_time_s: raw.solve_time_s,
             iterations: raw.iterations,
+            raw_x: raw.x,
+            raw_z: raw.z,
         })
     }
+}
+
+/// Exact discrete CVaR at level alpha: the mean loss over the worst (1−α)
+/// tail, with fractional-tail interpolation — this matches the value the
+/// Rockafellar–Uryasev constraint bounds at the optimum (a plain "mean of the
+/// worst ⌈m⌉ scenarios" would not, for fractional m).
+fn compute_cvar(scenarios: &[Vec<f64>], weights: &[f64], alpha: f64) -> f64 {
+    let mut losses: Vec<f64> = scenarios
+        .iter()
+        .map(|r| -r.iter().zip(weights).map(|(x, w)| x * w).sum::<f64>())
+        .collect();
+    losses.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    let m = ((1.0 - alpha) * losses.len() as f64).min(losses.len() as f64);
+    if m <= 0.0 {
+        return losses[0];
+    }
+    let full = m.floor() as usize;
+    let mut total: f64 = losses[..full].iter().sum();
+    let frac = m - full as f64;
+    if frac > 0.0 && full < losses.len() {
+        total += frac * losses[full];
+    }
+    total / m
 }
 
 /// Compute wᵀΣw for the full covariance model.
@@ -321,6 +394,301 @@ mod tests {
             .map(|(w, p)| (w - p).abs())
             .sum();
         assert!(turnover <= max_turnover + 1e-6, "turnover {turnover} exceeds budget");
+    }
+
+    #[cfg(feature = "osqp")]
+    #[test]
+    fn test_osqp_matches_clarabel() {
+        let strategy = Strategy::builder("Mix")
+            .minimize_risk(0.7)
+            .maximize("expected_return", 0.3)
+            .build();
+        let restrictions = || Restrictions::builder().long_only().fully_invested().build();
+
+        for universe in [dense_universe(), factor_universe()] {
+            let cl = PortfolioModel::new(&universe)
+                .strategy(&strategy)
+                .restrictions(restrictions())
+                .solve()
+                .unwrap();
+            let os = PortfolioModel::new(&universe)
+                .strategy(&strategy)
+                .restrictions(restrictions())
+                .backend(Backend::Osqp)
+                .solver_settings(SolverSettings::default_for(Backend::Osqp))
+                .solve()
+                .unwrap();
+            assert_eq!(os.status, crate::solution::SolveStatus::Optimal);
+            for (a, b) in cl.weights_vec.iter().zip(&os.weights_vec) {
+                assert!((a - b).abs() < 1e-5, "weights differ: {a} vs {b}");
+            }
+        }
+    }
+
+    #[cfg(feature = "osqp")]
+    #[test]
+    fn test_osqp_warm_start_round_trip_with_turnover() {
+        // Warm-starting through PortfolioSolution must round-trip the full
+        // [w, t] aux layout and reduce iterations on a perturbed re-solve.
+        let strategy = Strategy::builder("MinVar").minimize_risk(1.0).build();
+        let restrictions = || Restrictions::builder().long_only().fully_invested().build();
+        let settings = SolverSettings::default_for(Backend::Osqp);
+        let previous = vec![0.4, 0.3, 0.3];
+
+        let day1 = PortfolioModel::new(&dense_universe())
+            .strategy(&strategy)
+            .restrictions(restrictions())
+            .turnover(previous.clone(), 0.15)
+            .backend(Backend::Osqp)
+            .solver_settings(settings.clone())
+            .solve()
+            .unwrap();
+        // raw_x covers [w (3), t (3)]
+        assert_eq!(day1.raw_x.len(), 6);
+
+        // Day 2: slightly perturbed universe (same structure)
+        let mut assets2 = assets();
+        assets2[0] = Asset::new("A").score("expected_return", 0.11);
+        let universe2 = Universe::builder()
+            .assets(assets2)
+            .covariance_full(CscMatrix::from(&densified_sigma()))
+            .build()
+            .unwrap();
+
+        let solve_day2 = |warm: Option<&PortfolioSolution>| {
+            let mut model = PortfolioModel::new(&universe2)
+                .strategy(&strategy)
+                .restrictions(restrictions())
+                .turnover(day1.weights_vec.clone(), 0.15)
+                .backend(Backend::Osqp)
+                .solver_settings(settings.clone());
+            if let Some(prev) = warm {
+                model = model.warm_start(prev);
+            }
+            model.solve().unwrap()
+        };
+        let cold = solve_day2(None);
+        let warm = solve_day2(Some(&day1));
+
+        assert_eq!(warm.status, crate::solution::SolveStatus::Optimal);
+        assert!(
+            warm.iterations <= cold.iterations,
+            "warm ({}) should not exceed cold ({})",
+            warm.iterations,
+            cold.iterations
+        );
+        for (a, b) in cold.weights_vec.iter().zip(&warm.weights_vec) {
+            assert!((a - b).abs() < 1e-4);
+        }
+    }
+
+    fn te_universe() -> Universe {
+        // 2 assets, diagonal Σ; A low return, B high return
+        Universe::builder()
+            .add_asset(Asset::new("A").score("expected_return", 0.02))
+            .add_asset(Asset::new("B").score("expected_return", 0.10))
+            .covariance_full(CscMatrix::from(&[[0.04, 0.0], [0.0, 0.01]]))
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_tracking_error_analytic() {
+        // Benchmark = 100% A; fully invested ⇒ TE² = 0.05·(1−w_A)².
+        // Max-return objective favors B, so TE ≤ 0.05 binds:
+        // w_A = 1 − 0.05/√0.05 ≈ 0.77639
+        let universe = te_universe();
+        let strategy = Strategy::builder("TE")
+            .maximize("expected_return", 1.0)
+            .max_tracking_error(vec![1.0, 0.0], 0.05)
+            .build();
+        let solution = PortfolioModel::new(&universe)
+            .strategy(&strategy)
+            .restrictions(Restrictions::builder().long_only().fully_invested().build())
+            .solve()
+            .unwrap();
+
+        assert_eq!(solution.status, crate::solution::SolveStatus::Optimal);
+        let expected_wa = 1.0 - 0.05 / 0.05_f64.sqrt();
+        assert!(
+            (solution.weights_vec[0] - expected_wa).abs() < 1e-5,
+            "w_A = {}, expected {expected_wa}",
+            solution.weights_vec[0]
+        );
+        let te = solution.portfolio_scores["tracking_error"];
+        assert!(te <= 0.05 + 1e-6, "TE {te} exceeds limit");
+        assert!(te >= 0.05 - 1e-4, "TE should bind, got {te}");
+    }
+
+    #[test]
+    fn test_tracking_error_factor_matches_densified() {
+        let strategy = Strategy::builder("TE")
+            .minimize_risk(0.5)
+            .maximize("expected_return", 0.5)
+            .max_tracking_error(vec![0.4, 0.3, 0.3], 0.03)
+            .build();
+        let restrictions = || Restrictions::builder().long_only().fully_invested().build();
+
+        let factor_uni = factor_universe();
+        let dense_uni = dense_universe();
+        let sol_f = PortfolioModel::new(&factor_uni)
+            .strategy(&strategy)
+            .restrictions(restrictions())
+            .solve()
+            .unwrap();
+        let sol_d = PortfolioModel::new(&dense_uni)
+            .strategy(&strategy)
+            .restrictions(restrictions())
+            .solve()
+            .unwrap();
+
+        assert_eq!(sol_f.status, crate::solution::SolveStatus::Optimal);
+        for (wf, wd) in sol_f.weights_vec.iter().zip(&sol_d.weights_vec) {
+            assert!((wf - wd).abs() < 1e-5, "weights differ: {wf} vs {wd}");
+        }
+        assert!(
+            (sol_f.portfolio_scores["tracking_error"] - sol_d.portfolio_scores["tracking_error"])
+                .abs()
+                < 1e-6
+        );
+    }
+
+    fn cvar_universe() -> Universe {
+        Universe::builder()
+            .add_asset(Asset::new("A").score("expected_return", 0.10))
+            .add_asset(Asset::new("B").score("expected_return", 0.01))
+            .covariance_full(CscMatrix::from(&[[0.04, 0.0], [0.0, 0.01]]))
+            .scenarios(vec![
+                vec![0.10, 0.01],
+                vec![0.05, 0.01],
+                vec![-0.20, 0.01],
+                vec![0.02, 0.01],
+            ])
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_cvar_analytic() {
+        // α = 0.75, S = 4 ⇒ (1−α)S = 1 ⇒ CVaR = worst single scenario loss
+        // = 0.20·w_A − 0.01·w_B = 0.21·w_A − 0.01. Limit 0.05 ⇒ w_A ≤ 0.06/0.21.
+        // Max-return objective favors A, so the limit binds.
+        let universe = cvar_universe();
+        let strategy = Strategy::builder("CVaR")
+            .maximize("expected_return", 1.0)
+            .max_cvar(0.75, 0.05)
+            .build();
+        let solution = PortfolioModel::new(&universe)
+            .strategy(&strategy)
+            .restrictions(Restrictions::builder().long_only().fully_invested().build())
+            .solve()
+            .unwrap();
+
+        assert_eq!(solution.status, crate::solution::SolveStatus::Optimal);
+        let expected_wa = 0.06 / 0.21;
+        assert!(
+            (solution.weights_vec[0] - expected_wa).abs() < 1e-5,
+            "w_A = {}, expected {expected_wa}",
+            solution.weights_vec[0]
+        );
+        let cvar = solution.portfolio_scores["cvar"];
+        assert!((cvar - 0.05).abs() < 1e-5, "CVaR should bind at 0.05, got {cvar}");
+    }
+
+    #[test]
+    fn test_compute_cvar_fractional_tail() {
+        // Weights (1, 0): losses = -r_A = [0.20, 0.03, -0.01, -0.05, -0.10]
+        // sorted desc. α = 0.7, S = 5 ⇒ m = 1.5 ⇒ CVaR = (0.20 + 0.5·0.03)/1.5
+        let scenarios = vec![
+            vec![-0.20, 0.0],
+            vec![-0.03, 0.0],
+            vec![0.01, 0.0],
+            vec![0.05, 0.0],
+            vec![0.10, 0.0],
+        ];
+        let cvar = compute_cvar(&scenarios, &[1.0, 0.0], 0.7);
+        let expected = (0.20 + 0.5 * 0.03) / 1.5;
+        assert!((cvar - expected).abs() < 1e-12, "{cvar} vs {expected}");
+    }
+
+    #[test]
+    fn test_risk_constraints_infeasible_when_impossible() {
+        let universe = cvar_universe();
+        let strategy = Strategy::builder("Impossible")
+            .maximize("expected_return", 1.0)
+            .max_cvar(0.75, -10.0)
+            .build();
+        let solution = PortfolioModel::new(&universe)
+            .strategy(&strategy)
+            .restrictions(Restrictions::builder().long_only().fully_invested().build())
+            .solve()
+            .unwrap();
+        assert_eq!(solution.status, crate::solution::SolveStatus::Infeasible);
+    }
+
+    #[cfg(feature = "osqp")]
+    #[test]
+    fn test_osqp_rejects_tracking_error() {
+        let universe = te_universe();
+        let strategy = Strategy::builder("TE")
+            .maximize("expected_return", 1.0)
+            .max_tracking_error(vec![1.0, 0.0], 0.05)
+            .build();
+        let result = PortfolioModel::new(&universe)
+            .strategy(&strategy)
+            .restrictions(Restrictions::builder().long_only().fully_invested().build())
+            .backend(Backend::Osqp)
+            .solver_settings(SolverSettings::default_for(Backend::Osqp))
+            .solve();
+        assert!(matches!(
+            result,
+            Err(PortfolioError::Solver(quartz_solver::SolverError::Unsupported(_)))
+        ));
+    }
+
+    #[cfg(feature = "osqp")]
+    #[test]
+    fn test_osqp_cvar_matches_clarabel() {
+        let universe = cvar_universe();
+        let strategy = Strategy::builder("CVaR")
+            .maximize("expected_return", 1.0)
+            .max_cvar(0.75, 0.05)
+            .build();
+        let restrictions = || Restrictions::builder().long_only().fully_invested().build();
+        let cl = PortfolioModel::new(&universe)
+            .strategy(&strategy)
+            .restrictions(restrictions())
+            .solve()
+            .unwrap();
+        let os = PortfolioModel::new(&universe)
+            .strategy(&strategy)
+            .restrictions(restrictions())
+            .backend(Backend::Osqp)
+            .solver_settings(SolverSettings::default_for(Backend::Osqp))
+            .solve()
+            .unwrap();
+        for (a, b) in cl.weights_vec.iter().zip(&os.weights_vec) {
+            assert!((a - b).abs() < 1e-4, "weights differ: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn test_frontier_respects_risk_constraints() {
+        let universe = cvar_universe();
+        let strategy = Strategy::builder("Both")
+            .minimize_risk(0.5)
+            .maximize("expected_return", 0.5)
+            .max_cvar(0.75, 0.05)
+            .max_tracking_error(vec![0.5, 0.5], 0.10)
+            .build();
+        let result = crate::FrontierExplorer::new(&universe, &strategy)
+            .restrictions(Restrictions::builder().long_only().fully_invested().build())
+            .sweep("expected_return", "financial_risk", 7)
+            .unwrap();
+        for p in &result.points {
+            assert!(p.portfolio_scores["cvar"] <= 0.05 + 1e-5);
+            assert!(p.portfolio_scores["tracking_error"] <= 0.10 + 1e-5);
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::constraints::{GroupConstraint, ScoreConstraint};
+use crate::constraints::{CvarConstraint, GroupConstraint, ScoreConstraint, TrackingErrorConstraint};
 use crate::strategy::Strategy;
 
 /// A tactical overlay that adjusts a strategy's parameters for a shorter horizon.
@@ -102,6 +102,10 @@ pub struct MergedStrategy {
     pub group_constraints: Vec<GroupConstraint>,
     pub score_constraints: Vec<ScoreConstraint>,
     pub fully_invested: bool,
+    /// Passed through unchanged (no tactic override in v1; the natural future
+    /// semantic is min-tightening of the limits).
+    pub tracking_error: Option<TrackingErrorConstraint>,
+    pub cvar: Option<CvarConstraint>,
 }
 
 /// Merge a strategy with an optional tactic.
@@ -118,6 +122,8 @@ pub fn merge(strategy: &Strategy, tactic: Option<&Tactic>) -> Result<MergedStrat
                 group_constraints: strategy.group_constraints.clone(),
                 score_constraints: strategy.score_constraints.clone(),
                 fully_invested: strategy.fully_invested,
+                tracking_error: strategy.tracking_error.clone(),
+                cvar: strategy.cvar.clone(),
             })
         }
     };
@@ -203,6 +209,8 @@ pub fn merge(strategy: &Strategy, tactic: Option<&Tactic>) -> Result<MergedStrat
         group_constraints: merged_groups,
         score_constraints: merged_scores,
         fully_invested: strategy.fully_invested,
+        tracking_error: strategy.tracking_error.clone(),
+        cvar: strategy.cvar.clone(),
     })
 }
 

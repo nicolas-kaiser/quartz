@@ -232,6 +232,45 @@ def test_simplex_grid():
     assert len(fr) + fr.n_skipped == 15
 
 
+def test_risk_constraints():
+    # Tracking error: benchmark 100% A, diag Σ, fully invested
+    # ⇒ TE² = (0.04+0.01)(1−w_A)²; max-return objective favors B; limit binds.
+    assets = [
+        quartz.Asset("A", scores={"expected_return": 0.02}),
+        quartz.Asset("B", scores={"expected_return": 0.10}),
+    ]
+    scen = np.array([[0.10, 0.01], [0.05, 0.01], [-0.20, 0.01], [0.02, 0.01]])
+    u = quartz.Universe(
+        assets=assets, covariance=np.diag([0.04, 0.01]), scenarios=scen
+    )
+    s = (quartz.Strategy("Risk")
+         .maximize("expected_return", 1.0)
+         .max_tracking_error([1.0, 0.0], 0.05))
+    sol = quartz.solve(u, s, restrictions=base_restrictions())
+    assert sol.status == quartz.SolveStatus.Optimal
+    assert sol.portfolio_scores["tracking_error"] <= 0.05 + 1e-6
+    assert abs(sol.weights_vec[0] - (1 - 0.05 / 0.05**0.5)) < 1e-5
+
+    # CVaR: alpha=0.75, S=4 ⇒ worst-scenario loss; limit 0.05 binds at
+    # w_A = 0.06/0.21 (A has the dominant expected return here)
+    assets2 = [
+        quartz.Asset("A", scores={"expected_return": 0.10}),
+        quartz.Asset("B", scores={"expected_return": 0.01}),
+    ]
+    u2 = quartz.Universe(assets=assets2, covariance=np.diag([0.04, 0.01]), scenarios=scen)
+    s2 = quartz.Strategy("CVaR").maximize("expected_return", 1.0).max_cvar(0.75, 0.05)
+    sol2 = quartz.solve(u2, s2, restrictions=base_restrictions())
+    assert sol2.status == quartz.SolveStatus.Optimal
+    assert abs(sol2.portfolio_scores["cvar"] - 0.05) < 1e-5
+    assert abs(sol2.weights_vec[0] - 0.06 / 0.21) < 1e-5
+
+    # CVaR without scenarios raises
+    u3 = quartz.Universe(assets=assets2, covariance=np.diag([0.04, 0.01]))
+    with pytest.raises(quartz.QuartzError):
+        quartz.solve(u3, quartz.Strategy("X").maximize("expected_return", 1.0).max_cvar(0.95, 0.02),
+                     restrictions=base_restrictions())
+
+
 def test_tactic():
     assets = [
         quartz.Asset("A", tags={"currency": "USD"}, scores={"expected_return": 0.10}),

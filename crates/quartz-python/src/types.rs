@@ -61,15 +61,19 @@ pub struct Universe {
 #[pymethods]
 impl Universe {
     #[new]
-    #[pyo3(signature = (assets, covariance=None, factor_model=None))]
+    #[pyo3(signature = (assets, covariance=None, factor_model=None, scenarios=None))]
     fn new(
         assets: Vec<Asset>,
         covariance: Option<Matrix<'_>>,
         factor_model: Option<(Matrix<'_>, Matrix<'_>, Vec<f64>)>,
+        scenarios: Option<Matrix<'_>>,
     ) -> PyResult<Self> {
         let mut builder = quartz_core::Universe::builder();
         for a in assets {
             builder = builder.add_asset(a.inner);
+        }
+        if let Some(s) = &scenarios {
+            builder = builder.scenarios(s.to_dense_rows()?);
         }
         let builder = match (&covariance, &factor_model) {
             (Some(c), None) => builder.covariance_full(c.to_csc()?),
@@ -190,6 +194,25 @@ impl Strategy {
     /// Set whether the portfolio must be fully invested (default True).
     fn fully_invested(mut slf: PyRefMut<'_, Self>, value: bool) -> PyRefMut<'_, Self> {
         slf.builder = slf.builder.clone().fully_invested(value);
+        slf
+    }
+
+    /// Limit tracking error vs a benchmark: ‖w − w_b‖_Σ ≤ max_te.
+    /// Benchmark weights are ordered by universe index; max_te is in the
+    /// covariance's units (e.g. annualized).
+    fn max_tracking_error(
+        mut slf: PyRefMut<'_, Self>,
+        benchmark_weights: Vec<f64>,
+        max_te: f64,
+    ) -> PyRefMut<'_, Self> {
+        slf.builder = slf.builder.clone().max_tracking_error(benchmark_weights, max_te);
+        slf
+    }
+
+    /// Limit CVaR at confidence alpha (0.95 = expected loss over the worst 5%
+    /// of the universe's return scenarios) to max_cvar, in scenario units.
+    fn max_cvar(mut slf: PyRefMut<'_, Self>, alpha: f64, max_cvar: f64) -> PyRefMut<'_, Self> {
+        slf.builder = slf.builder.clone().max_cvar(alpha, max_cvar);
         slf
     }
 }

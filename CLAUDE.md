@@ -16,6 +16,8 @@ A multi-dimensional portfolio optimizer in Rust. It is a **modeler + compiler**,
 cargo build                                              # Build all crates
 cargo test                                               # Run all unit tests
 cargo test -p quartz-portfolio --no-default-features     # Serial fallback (no rayon) must also pass
+cargo test -p quartz-solver --features osqp              # OSQP backend tests (needs cmake + C compiler)
+cargo test -p quartz-portfolio --features osqp           # OSQP integration tests
 cargo test -p quartz-portfolio                           # Test a single crate
 cargo test -p quartz-portfolio compiler::                # Run tests in one module
 cargo run --example markowitz -p quartz-portfolio        # Min-variance, 3 assets
@@ -31,7 +33,7 @@ Three workspace crates with a strict layering (data → solver wrapper → busin
 | Crate | Role |
 |-------|------|
 | `quartz-core` | Data types only: `Asset`, `Universe`, `Dimension`, `CovarianceModel`. Depends only on `clarabel` (for `CscMatrix`) and `serde`. No solver logic. |
-| `quartz-solver` | Thin Clarabel wrapper: `CompiledProblem → RawSolution` via `solve_qp()`. All Clarabel solver API usage is isolated here. |
+| `quartz-solver` | Solver wrapper: `CompiledProblem → RawSolution` via `solve_qp()` / `solve_qp_with(problem, settings, Backend, Option<&WarmStart>)`. Backends: Clarabel (default, interior-point, pure Rust) and OSQP (`osqp` cargo feature, off by default — vendors the OSQP C solver, needs cmake+cc; ADMM, supports warm starts). All solver API usage is isolated here. |
 | `quartz-portfolio` | Everything else: constraints, `Strategy`/`Tactic`/`Restrictions`, the compiler, and the `PortfolioModel` facade. |
 
 Two more crates sit on top:
@@ -43,7 +45,13 @@ Two more crates sit on top:
 
 `PortfolioModel::solve()` (`model.rs`) → `compile()` (`compiler.rs`) → `solve_qp()` (quartz-solver) → `PortfolioSolution` (`solution.rs`).
 
-The compiler is the heart of the system. Each constraint type in `quartz-portfolio/src/constraints/` implements `compile() -> ConstraintContribution` — a set of `(row, col, val)` triplets, `b` entries, and equality/inequality row counts. The compiler offsets local row indices, assembles everything into Clarabel's `CscMatrix` (no `sprs` dependency), and orders rows **equalities first (ZeroConeT), then inequalities (NonnegativeConeT)**.
+The compiler is the heart of the system. Each constraint type in `quartz-portfolio/src/constraints/` implements `compile() -> ConstraintContribution` — a set of `(row, col, val)` triplets, `b` entries, equality/inequality row counts, and optional `soc_blocks` (second-order cone dims). The compiler offsets local row indices, assembles everything into Clarabel's `CscMatrix` (no `sprs` dependency), and orders rows **equalities first (ZeroConeT), then inequalities (NonnegativeConeT), then SOC blocks (SecondOrderConeT, rows and cones in the same iteration order)**.
+
+Risk constraints on `Strategy` (both `#[serde(default)]`, passed through `tactic::merge` unchanged): **tracking error** `‖w − w_b‖_Σ ≤ TE` compiles to one SOC block via a Cholesky factor (`math.rs`, escalating-jitter for PSD-singular covariances; factor-model variant splits into `‖GᵀBᵀd‖² + ‖D^½d‖²` written over w columns directly — never reuse the y aux vars); **CVaR** (Rockafellar–Uryasev over `Universe.scenarios`) is pure inequality rows + `1+S` aux vars at the end of the layout — it works on OSQP, while TE correctly fails there as `Unsupported`. Ex-post `tracking_error`/`cvar` land in `portfolio_scores`, gated on constraint presence (not on the quadratic dimension like `financial_risk`). TE + exclusions of benchmark-weighted assets can be solver-Infeasible — that's correct, not a compile error.
+
+### OSQP warm-start backend
+
+`Backend::Osqp` (feature `osqp`, off by default) converts the Clarabel form to OSQP's `l ≤ Ax ≤ u`: ZeroConeT rows → `l = u = b`, NonnegativeConeT rows → `l = −OSQP_INFTY, u = b`; other cones error loudly. **Pitfalls**: OSQP's infinity is `1e30` (`OSQP_INFTY`) — IEEE `−inf` bounds NaN-poison its duality-gap termination check and every solve runs to max_iter despite converged residuals; Clarabel-tuned settings (max_iter 200, tol 1e-8) are pathological for ADMM — use `SolverSettings::default_for(Backend::Osqp)` (20k iters, 1e-6, polishing on); on infeasibility OSQP has no primal iterate, so the backend returns full-length NaN vectors to keep `raw.x[..n]` indexing safe. Warm-start round-trip: `PortfolioSolution.raw_x/raw_z` (full `[w, t?, y]` layout) → `PortfolioModel::warm_start(&prev)`; Clarabel accepts and ignores the hint; OSQP hard-errors on dimension mismatch (means chaining across structurally different problems). Dual sign conventions agree across backends. Sequential turnover-chained backtests are the use case (`examples/backtest_warmstart.rs`); parallel `solve_batch` doesn't benefit. Workspace reuse (`update_lin_cost`/`update_bounds` on a persistent OSQP problem) is a documented future optimization.
 
 ### Parallel batch solving
 
@@ -61,7 +69,7 @@ The compiler is the heart of the system. Each constraint type in `quartz-portfol
 
 ### Key design decisions
 
-- Auxiliary variables extend the decision vector in a fixed order: `[w (n), t (n, if turnover), y (k, if factor covariance)]`. Turnover hardcodes t at columns `n..2n`, so y always comes after t (`n_aux` in `CompiledProblem` counts both).
+- Auxiliary variables extend the decision vector in a fixed order: `[w (n), t (n, if turnover), y (k, if factor covariance), ζ+u (1+S, if CVaR)]`. Turnover hardcodes t at columns `n..2n`, so later blocks always come after it (`n_aux` in `CompiledProblem` counts them all). Warm-starting across problems whose aux blocks differ is a dimension mismatch (hard error under OSQP).
 - Tags are `HashMap<String, String>` and scores `HashMap<String, f64>` — extensible, not enums.
 - `CovarianceModel::Factor` (Σ = BFBᵀ + D) compiles via k auxiliary variables y = Bᵀw so the objective is `yᵀFy + wᵀDw` (block-diagonal sparse P, O(nk²)) plus k equality link rows (`constraints/factor.rs`). y vars are only allocated when a quadratic dimension is present — dead free variables can make Clarabel's KKT system singular. Covariance matrices (Σ and F) must be stored full-symmetric; the compiler extracts the upper triangle (Clarabel silently drops strict-lower-triangle P entries).
 - No MIP support in v1: no cardinality or semi-continuous constraints.

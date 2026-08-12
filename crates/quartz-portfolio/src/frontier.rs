@@ -271,6 +271,8 @@ impl<'a> FrontierExplorer<'a> {
             group_constraints: base.group_constraints.clone(),
             score_constraints: base.score_constraints.clone(),
             fully_invested: base.fully_invested,
+            tracking_error: base.tracking_error.clone(),
+            cvar: base.cvar.clone(),
         };
         let mut model = PortfolioModel::new(self.universe)
             .strategy(&strategy)
@@ -614,6 +616,8 @@ mod tests {
             group_constraints: vec![],
             score_constraints: vec![],
             fully_invested: true,
+            tracking_error: None,
+            cvar: None,
         };
         let normalized = base_strategy();
 
