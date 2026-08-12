@@ -1,0 +1,11 @@
+ticker,currency,sector,asset_class,environmental_impact,social_score,governance_score,physical_risk,transition_risk
+AAPL,USD,Technology,Equity,7.8,5.29,8.58,3.64,0.92
+MSFT,USD,Technology,Equity,9.32,7.71,8.11,1.08,2.53
+JPM,USD,Financials,Equity,4.78,8.95,7.19,4.2,2.5
+XOM,USD,Energy,Equity,3.7,6.16,3.41,4.22,3.34
+JNJ,USD,Healthcare,Equity,7.69,4.66,9.31,4.52,4.0
+NESN.SW,CHF,Consumer Staples,Equity,3.46,5.5,3.28,1.19,3.57
+NOVN.SW,CHF,Healthcare,Equity,7.59,9.26,5.12,2.17,2.61
+MC.PA,EUR,Consumer Discretionary,Equity,3.42,2.97,6.09,1.52,3.51
+SAP.DE,EUR,Technology,Equity,5.28,8.25,7.55,1.91,4.25
+AIR.PA,EUR,Industrials,Equity,8.04,4.91,4.87,3.57,1.13

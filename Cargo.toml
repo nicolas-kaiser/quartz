@@ -3,6 +3,7 @@ members = [
     "crates/quartz-core",
     "crates/quartz-solver",
     "crates/quartz-portfolio",
+    "crates/quartz-demo",
 ]
 resolver = "2"
 
