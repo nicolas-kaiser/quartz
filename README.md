@@ -38,6 +38,7 @@ Quartz is a **modeler + compiler**: it translates your high-level portfolio stra
 - **Exclusion lists** — exclude by tag (sector = Tobacco) or by specific asset
 - **Turnover control** — limit total portfolio rebalancing with warm-start from previous weights
 - **Factor covariance models** — `Σ = BFBᵀ + D` compiles to a sparse QP with k auxiliary variables (O(nk²) instead of O(n²))
+- **Pareto frontier exploration** — sweep two dimensions against each other or enumerate a full simplex grid, with non-dominated filtering (`FrontierExplorer`)
 - **Pure Rust** — zero C/C++ dependencies, compiles anywhere Rust does
 - **~1ms solve time** — for typical 5-asset problems with full constraint sets
 
@@ -157,6 +158,9 @@ cargo run --example markowitz -p quartz-portfolio
 
 # Multi-dimensional ESG optimization (5 assets, 5 dimensions, group constraints)
 cargo run --example multi_dimension -p quartz-portfolio
+
+# Pareto frontier sweep (risk vs return trade-off table)
+cargo run --example frontier -p quartz-portfolio
 ```
 
 ## Building
@@ -171,7 +175,7 @@ Requires **Rust stable** (edition 2021). No C/C++ toolchain needed.
 ## Roadmap
 
 - [x] Factor covariance model support (`Σ = BFBᵀ + D`) for O(nk²) scaling
-- [ ] Pareto frontier exploration (multi-objective trade-off visualization)
+- [x] Pareto frontier exploration (multi-objective trade-off visualization)
 - [ ] Parallel batch solving with `rayon` (backtest 1000 dates in parallel)
 - [ ] Python bindings via PyO3 + maturin
 - [ ] OSQP backend for warm-start support

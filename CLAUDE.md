@@ -43,6 +43,10 @@ A fourth crate, `quartz-demo`, is a JSON stdin/stdout CLI bridge used by the Str
 
 The compiler is the heart of the system. Each constraint type in `quartz-portfolio/src/constraints/` implements `compile() -> ConstraintContribution` — a set of `(row, col, val)` triplets, `b` entries, and equality/inequality row counts. The compiler offsets local row indices, assembles everything into Clarabel's `CscMatrix` (no `sprs` dependency), and orders rows **equalities first (ZeroConeT), then inequalities (NonnegativeConeT)**.
 
+### Pareto frontier
+
+`frontier.rs` re-solves the QP across dimension-weight combinations: `FrontierExplorer::sweep(dim_a, dim_b, n)` trades two dimensions (others fixed; the base strategy lies on the sweep) and `simplex_grid(resolution)` enumerates all compositions over every dimension (capped at 10 000 solves). Non-dominated points are flagged via `pareto_flags` over sense-canonicalized metrics. Two invariants: the tactic is merged **once up front** (per-point solves pass tactic `None` — `tactic::merge` re-normalizes weights and would distort swept values), and the quadratic dimension is kept at weight 0 rather than dropped (so `financial_risk` stays reported and factor-model y-vars stay constrained).
+
 ### Three-layer constraint model
 
 - **Strategy** — long-term dimension weights and allocation bounds ("40% risk, 25% return, EUR 40–60%")

@@ -50,6 +50,9 @@ price paths and says so.
 - **Group constraints** — min/max allocation per currency or sector
 - **Portfolio score bounds** — e.g. average environmental score ≥ 7
 - **Restrictions** — long-only, max weight per asset, exclusions by asset or sector
+- **Pareto Frontier tab** — sweep any two objectives against each other
+  (e.g. volatility vs expected return); dominated points shown grey, the
+  efficient frontier connected, with your current strategy marked on the chart
 
 The "Universe & Data" tab shows the asset table, normalized prices, and the
 return correlation matrix. The JSON spec sent to Rust is visible in an expander
