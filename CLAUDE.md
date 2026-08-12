@@ -34,9 +34,10 @@ Three workspace crates with a strict layering (data → solver wrapper → busin
 | `quartz-solver` | Thin Clarabel wrapper: `CompiledProblem → RawSolution` via `solve_qp()`. All Clarabel solver API usage is isolated here. |
 | `quartz-portfolio` | Everything else: constraints, `Strategy`/`Tactic`/`Restrictions`, the compiler, and the `PortfolioModel` facade. |
 
-A `quartz-python` crate (PyO3 bindings) is planned but not yet implemented.
+Two more crates sit on top:
 
-A fourth crate, `quartz-demo`, is a JSON stdin/stdout CLI bridge used by the Streamlit demo in `demo/` (see `demo/README.md`): `cargo build --release -p quartz-demo`, `python demo/fetch_data.py` (Yahoo Finance → CSVs in `demo/data/`), then `streamlit run demo/app.py`. ESG/climate scores in the demo data are random placeholders.
+- `quartz-python` — PyO3 bindings (`import quartz`), built with maturin. The `pyo3/extension-module` feature is enabled **only** in its pyproject.toml (`[tool.maturin] features`), never in Cargo.toml — that keeps workspace `cargo test` linking libpython normally; the crate also sets `[lib] test = false, doctest = false` (tests are pytest). Binding patterns: kwargs constructors for data types, `PyRefMut` chaining for Strategy/Tactic (relies on `#[derive(Clone)]` on the Rust builders), one `QuartzError(ValueError)` exception, and `Python::detach` around every solve (clone Rust values out of pyclasses first — PyRef is not Send) so `solve_batch` runs rayon-parallel with the GIL released. Dev loop: `python3 -m venv .venv && .venv/bin/pip install maturin pytest numpy`, then `VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m crates/quartz-python/Cargo.toml` and `.venv/bin/pytest crates/quartz-python/tests -q`.
+- `quartz-demo` — JSON stdin/stdout CLI bridge (single solve, `frontier`, and `batch` modes). The Streamlit demo in `demo/` now imports the `quartz` bindings directly instead of shelling out to this binary; the app needs the wheel installed (`maturin build --release -m crates/quartz-python/Cargo.toml && pip install target/wheels/quartz-*.whl`). Demo data: `python demo/fetch_data.py` (Yahoo Finance → CSVs; ESG/climate scores are random placeholders), then `streamlit run demo/app.py`.
 
 ### Compilation pipeline
 

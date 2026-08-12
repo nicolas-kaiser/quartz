@@ -2,17 +2,18 @@
 
 Loads market data prepared by fetch_data.py (Yahoo Finance prices + random
 ESG/climate scores), lets you configure a Strategy and Restrictions
-interactively, and solves via the `quartz-demo` Rust binary (JSON over
-stdin/stdout).
+interactively, and solves in-process through the `quartz` Python bindings
+(PyO3; batch solves run rayon-parallel with the GIL released).
 
 Run from the repo root:
-    cargo build --release -p quartz-demo
+    pip install maturin
+    maturin build --release -m crates/quartz-python/Cargo.toml
+    pip install target/wheels/quartz-*.whl
     python demo/fetch_data.py
     streamlit run demo/app.py
 """
 
-import json
-import subprocess
+import time
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +22,11 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+try:
+    import quartz
+except ImportError:
+    quartz = None
+
 DATA_DIR = Path(__file__).resolve().parent / "data"
 TRADING_DAYS = 252
 
@@ -37,14 +42,6 @@ st.set_page_config(page_title="Quartz Demo", page_icon="🔷", layout="wide")
 
 
 # ---------------------------------------------------------------- data layer
-def find_binary() -> Path | None:
-    for profile in ("release", "debug"):
-        p = REPO_ROOT / "target" / profile / "quartz-demo"
-        if p.exists():
-            return p
-    return None
-
-
 @st.cache_data
 def load_data():
     prices = pd.read_csv(DATA_DIR / "prices.csv", index_col="date", parse_dates=True)
@@ -70,26 +67,157 @@ def pca_factor_model(cov: pd.DataFrame, k: int):
     return loadings, np.diag(factor_var), specific
 
 
-def solve(spec: dict, binary: Path, timeout: int = 30) -> dict:
-    proc = subprocess.run(
-        [str(binary)],
-        input=json.dumps(spec),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
+# ------------------------------------------------ quartz bindings interpreter
+# The app keeps building a JSON-like spec dict (it drives the UI and the
+# "spec JSON" expander); these helpers interpret it with the quartz bindings
+# and return the same dict shapes the old subprocess bridge produced.
+def _build_universe(asset_specs, covariance=None, factor_model=None, score_overrides=None):
+    assets = []
+    for a in asset_specs:
+        scores = dict(a["scores"])
+        if score_overrides and a["id"] in score_overrides:
+            scores.update(score_overrides[a["id"]])
+        assets.append(quartz.Asset(a["id"], tags=a.get("tags"), scores=scores))
+    if factor_model is not None:
+        fm = (
+            factor_model["loadings"],
+            factor_model["factor_cov"],
+            factor_model["specific_variance"],
+        )
+        return quartz.Universe(assets=assets, factor_model=fm)
+    return quartz.Universe(assets=assets, covariance=covariance)
+
+
+def _build_strategy(sspec: dict):
+    s = quartz.Strategy(sspec["name"])
+    for d in sspec["dimensions"]:
+        if d["kind"] == "risk":
+            s = s.minimize_risk(d["weight"])
+        elif d["sense"] == "maximize":
+            s = s.maximize(d["score_key"], d["weight"])
+        else:
+            s = s.minimize(d["score_key"], d["weight"])
+    for g in sspec.get("groups", []):
+        s = s.group(g["tag_key"], g["tag_value"], g["lower"], g["upper"])
+    for b in sspec.get("score_bounds", []):
+        if b["bound"] == "min":
+            s = s.score_min(b["score_key"], b["threshold"])
+        else:
+            s = s.score_max(b["score_key"], b["threshold"])
+    # Fully-invested is controlled via restrictions in the demo spec.
+    return s.fully_invested(False)
+
+
+def _build_restrictions(rspec: dict):
+    return quartz.Restrictions(
+        long_only=rspec.get("long_only", False),
+        fully_invested=rspec.get("fully_invested", False),
+        max_single_weight=rspec.get("max_single_weight"),
+        exclude_assets=rspec.get("exclude_assets", []),
+        exclude_tags=[tuple(t) for t in rspec.get("exclude_tags", [])],
     )
+
+
+def _status_name(status) -> str:
+    return str(status).split(".")[-1]
+
+
+def _solution_dict(sol) -> dict:
+    return {
+        "status": _status_name(sol.status),
+        "weights": [{"id": k, "weight": v} for k, v in sol.weights.items()],
+        "portfolio_scores": dict(sol.portfolio_scores),
+        "objective_value": sol.objective_value,
+        "solve_time_s": sol.solve_time_s,
+        "iterations": sol.iterations,
+    }
+
+
+def solve(spec: dict) -> dict:
     try:
-        return json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return {"error": proc.stderr or proc.stdout or "no output from solver"}
+        strategy = _build_strategy(spec["strategy"])
+        restrictions = _build_restrictions(spec["restrictions"])
+
+        if "batch" in spec:
+            problems, build_errors = [], {}
+            for i, item in enumerate(spec["batch"]["items"]):
+                cov = item.get("covariance")
+                fm = item.get("factor_model")
+                if cov is None and fm is None:
+                    cov, fm = spec.get("covariance"), spec.get("factor_model")
+                try:
+                    u = _build_universe(spec["assets"], cov, fm, item.get("scores"))
+                    problems.append(quartz.Problem(u, strategy, restrictions=restrictions))
+                except quartz.QuartzError as e:
+                    build_errors[i] = str(e)
+                    problems.append(None)
+            live = [p for p in problems if p is not None]
+            t0 = time.perf_counter()
+            results = iter(quartz.solve_batch(live))
+            wall_time_s = time.perf_counter() - t0
+            solutions, sum_solve_time_s = [], 0.0
+            for i, p in enumerate(problems):
+                if p is None:
+                    solutions.append({"error": build_errors[i]})
+                    continue
+                r = next(results)
+                if isinstance(r, quartz.QuartzError):
+                    solutions.append({"error": str(r)})
+                else:
+                    sum_solve_time_s += r.solve_time_s
+                    solutions.append(_solution_dict(r))
+            return {
+                "solutions": solutions,
+                "n_items": len(solutions),
+                "wall_time_s": wall_time_s,
+                "sum_solve_time_s": sum_solve_time_s,
+            }
+
+        universe = _build_universe(
+            spec["assets"], spec.get("covariance"), spec.get("factor_model")
+        )
+
+        if "frontier" in spec:
+            fs = spec["frontier"]
+            if fs["mode"] == "sweep":
+                fr = quartz.sweep(
+                    universe, strategy, fs["dim_a"], fs["dim_b"],
+                    n_points=fs.get("n_points", 25), restrictions=restrictions,
+                )
+            else:
+                fr = quartz.simplex_grid(
+                    universe, strategy,
+                    resolution=fs.get("resolution", 5), restrictions=restrictions,
+                )
+            return {
+                "points": [
+                    {
+                        "dimension_weights": list(p.dimension_weights.items()),
+                        "weights": list(p.weights.items()),
+                        "weights_vec": p.weights_vec,
+                        "portfolio_scores": dict(p.portfolio_scores),
+                        "objective_value": p.objective_value,
+                        "is_efficient": p.is_efficient,
+                    }
+                    for p in fr.points
+                ],
+                "objective_dims": fr.objective_dims,
+                "n_skipped": fr.n_skipped,
+            }
+
+        sol = quartz.solve(universe, strategy, restrictions=restrictions)
+        return _solution_dict(sol)
+    except (quartz.QuartzError, ValueError, KeyError) as e:
+        return {"error": str(e)}
 
 
 # ---------------------------------------------------------------- page setup
-binary = find_binary()
-if binary is None:
+if quartz is None:
     st.error(
-        "The `quartz-demo` binary was not found. Build it first:\n\n"
-        "```\ncargo build --release -p quartz-demo\n```"
+        "The `quartz` Python module is not installed. Build it first:\n\n"
+        "```\npip install maturin\n"
+        "maturin build --release -m crates/quartz-python/Cargo.toml\n"
+        "pip install target/wheels/quartz-*.whl\n```"
     )
     st.stop()
 
@@ -233,7 +361,7 @@ with tab_opt:
         st.warning("Set at least one objective weight above zero.")
         st.stop()
 
-    result = solve(spec, binary)
+    result = solve(spec)
 
     if "error" in result:
         st.error(f"Solver error: {result['error']}")
@@ -330,7 +458,7 @@ with tab_frontier:
                 "dim_b": dim_x,
                 "n_points": n_points,
             }
-            fresult = solve(frontier_spec, binary)
+            fresult = solve(frontier_spec)
 
             if "error" in fresult:
                 st.error(f"Frontier error: {fresult['error']}")
@@ -381,7 +509,7 @@ with tab_frontier:
                     )
                 )
                 # Current sidebar strategy as a reference marker
-                current = solve(spec, binary)
+                current = solve(spec)
                 if "error" not in current and current["status"] == "Optimal":
                     fig.add_trace(
                         go.Scatter(
@@ -459,7 +587,7 @@ with tab_backtest:
 
         batch_spec = {k: v for k, v in spec.items() if k != "frontier"}
         batch_spec["batch"] = {"items": items}
-        bresult = solve(batch_spec, binary, timeout=120)
+        bresult = solve(batch_spec)
 
         if "error" in bresult:
             st.error(f"Backtest error: {bresult['error']}")

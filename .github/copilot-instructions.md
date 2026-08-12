@@ -12,7 +12,8 @@ quartz/
 │   ├── quartz-core/        # Types: Asset, Universe, Dimension (no solver dependency)
 │   ├── quartz-solver/      # Thin wrapper around Clarabel (CompiledProblem → RawSolution)
 │   ├── quartz-portfolio/   # Modeler + Compiler (Strategy, Tactic, Restriction → QP)
-│   └── quartz-python/      # PyO3 bindings (not yet implemented)
+│   ├── quartz-python/      # PyO3 bindings (maturin; import quartz)
+│   └── quartz-demo/        # JSON stdin/stdout CLI + Streamlit demo backend types
 ```
 
 - **quartz-core** depends only on `clarabel` (for `CscMatrix`) and `serde`. No solver logic.

@@ -1,0 +1,25 @@
+[package]
+name = "quartz-python"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Python bindings (PyO3) for the Quartz portfolio optimizer"
+
+[lib]
+name = "quartz"
+crate-type = ["cdylib"]
+# No Rust tests here (tests are pytest); also keeps workspace `cargo test`
+# from building a test harness that would need to link libpython.
+test = false
+doctest = false
+
+[dependencies]
+# NOTE: pyo3/extension-module is deliberately NOT enabled here — maturin
+# enables it via pyproject.toml. With it off, plain cargo builds link
+# libpython normally and workspace `cargo test` keeps working.
+pyo3 = { version = "0.29", features = ["abi3-py39"] }
+numpy = "0.29"
+clarabel = { workspace = true }
+quartz-core = { path = "../quartz-core" }
+quartz-solver = { path = "../quartz-solver" }
+quartz-portfolio = { path = "../quartz-portfolio" }

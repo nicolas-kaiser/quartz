@@ -27,6 +27,7 @@ impl Tactic {
     }
 }
 
+#[derive(Clone)]
 pub struct TacticBuilder {
     name: String,
     group_overrides: Vec<GroupConstraint>,

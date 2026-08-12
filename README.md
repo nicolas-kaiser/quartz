@@ -40,6 +40,7 @@ Quartz is a **modeler + compiler**: it translates your high-level portfolio stra
 - **Factor covariance models** — `Σ = BFBᵀ + D` compiles to a sparse QP with k auxiliary variables (O(nk²) instead of O(n²))
 - **Pareto frontier exploration** — sweep two dimensions against each other or enumerate a full simplex grid, with non-dominated filtering (`FrontierExplorer`)
 - **Parallel batch solving** — `solve_batch` runs independent problems on all cores via `rayon` (1000-date backtest in ~13 ms); opt out with `default-features = false`
+- **Python bindings** — `import quartz` (PyO3 + maturin); batch solves release the GIL and run rayon-parallel
 - **Pure Rust** — zero C/C++ dependencies, compiles anywhere Rust does
 - **~1ms solve time** — for typical 5-asset problems with full constraint sets
 
@@ -167,6 +168,40 @@ cargo run --example frontier -p quartz-portfolio
 cargo run --release --example backtest -p quartz-portfolio
 ```
 
+## Python
+
+```sh
+pip install maturin
+maturin build --release -m crates/quartz-python/Cargo.toml
+pip install target/wheels/quartz-*.whl
+```
+
+```python
+import quartz
+
+u = quartz.Universe(
+    assets=[
+        quartz.Asset("AAPL", tags={"currency": "USD"},
+                     scores={"expected_return": 0.10, "environmental_impact": 6.5}),
+        quartz.Asset("NESN", tags={"currency": "CHF"},
+                     scores={"expected_return": 0.04, "environmental_impact": 8.0}),
+    ],
+    covariance=[[0.04, 0.002], [0.002, 0.01]],   # numpy arrays work too
+)
+s = (quartz.Strategy("ESG")
+     .minimize_risk(0.5)
+     .maximize("expected_return", 0.3)
+     .maximize("environmental_impact", 0.2))
+r = quartz.Restrictions(long_only=True, fully_invested=True, max_single_weight=0.6)
+
+sol = quartz.solve(u, s, restrictions=r)
+print(sol.status, sol.weights, sol.portfolio_scores)
+
+# Batch (GIL released, rayon-parallel) and Pareto frontier:
+sols = quartz.solve_batch([(u, s)] * 100, restrictions=r)
+frontier = quartz.sweep(u, s, "expected_return", "financial_risk", n_points=25, restrictions=r)
+```
+
 ## Building
 
 ```sh
@@ -181,7 +216,7 @@ Requires **Rust stable** (edition 2021). No C/C++ toolchain needed.
 - [x] Factor covariance model support (`Σ = BFBᵀ + D`) for O(nk²) scaling
 - [x] Pareto frontier exploration (multi-objective trade-off visualization)
 - [x] Parallel batch solving with `rayon` (backtest 1000 dates in parallel)
-- [ ] Python bindings via PyO3 + maturin
+- [x] Python bindings via PyO3 + maturin
 - [ ] OSQP backend for warm-start support
 - [ ] SOCP support for CVaR and tracking error constraints
 - [ ] JSON/YAML strategy file loading

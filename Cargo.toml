@@ -4,6 +4,7 @@ members = [
     "crates/quartz-solver",
     "crates/quartz-portfolio",
     "crates/quartz-demo",
+    "crates/quartz-python",
 ]
 resolver = "2"
 

@@ -29,6 +29,7 @@ impl Strategy {
 }
 
 /// Builder for constructing a Strategy fluently.
+#[derive(Clone)]
 pub struct StrategyBuilder {
     name: String,
     dimensions: Vec<Dimension>,

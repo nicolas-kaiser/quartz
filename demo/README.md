@@ -9,23 +9,24 @@ so reproducible), stored locally as CSV.
 ```
 Yahoo Finance ──▶ fetch_data.py ──▶ demo/data/*.csv
                                          │
-Streamlit (app.py) ── builds JSON spec ──▶ quartz-demo (Rust binary)
-                  ◀── JSON solution ─────  PortfolioModel::solve() / Clarabel
+Streamlit (app.py) ──▶ import quartz (PyO3 bindings, in-process)
+                        PortfolioModel::solve() / solve_batch / frontier / Clarabel
 ```
 
 The Streamlit app estimates annualized expected returns and the covariance
 matrix from daily prices, attaches tags (currency, sector) and scores to each
-asset, and sends the whole problem as JSON to the `quartz-demo` binary over
-stdin. The binary builds the `Universe`/`Strategy`/`Restrictions` with the
-regular Quartz API, solves, and returns the solution as JSON on stdout.
+asset, and solves in-process through the `quartz` Python bindings. Batch
+solves (the Backtest tab) release the GIL and run rayon-parallel in Rust.
 
 ## Setup
 
 From the repo root:
 
 ```sh
-# 1. Build the Rust bridge binary
-cargo build --release -p quartz-demo
+# 1. Build and install the quartz Python bindings
+pip install maturin
+maturin build --release -m crates/quartz-python/Cargo.toml
+pip install target/wheels/quartz-*.whl
 
 # 2. Install Python dependencies
 pip install -r demo/requirements.txt
@@ -66,7 +67,8 @@ on the Optimize tab.
 | File | Purpose |
 |------|---------|
 | `fetch_data.py` | Downloads prices, generates random ESG scores, writes CSVs |
-| `app.py` | Streamlit UI, spec builder, solver bridge |
+| `app.py` | Streamlit UI, spec builder, quartz-bindings backend |
 | `data/prices.csv` | Daily adjusted close prices (dates × tickers) |
 | `data/assets.csv` | Asset tags + random ESG/climate scores |
-| `../crates/quartz-demo` | Rust binary: JSON spec in → JSON solution out |
+| `../crates/quartz-python` | PyO3 bindings the app imports (`import quartz`) |
+| `../crates/quartz-demo` | Standalone CLI: JSON spec in → JSON solution out (no longer used by the app) |

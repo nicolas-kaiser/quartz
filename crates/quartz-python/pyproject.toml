@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.14,<2"]
+build-backend = "maturin"
+
+[project]
+name = "quartz"
+description = "Multi-dimensional portfolio optimizer (Rust core, Clarabel QP)"
+requires-python = ">=3.9"
+license = { text = "AGPL-3.0" }
+dynamic = ["version"]
+# numpy is optional: list-of-lists matrix inputs work without it
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest", "numpy"]
+
+[tool.maturin]
+module-name = "quartz"
+features = ["pyo3/extension-module"]
