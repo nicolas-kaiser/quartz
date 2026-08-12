@@ -215,6 +215,44 @@ impl Strategy {
         slf.builder = slf.builder.clone().max_cvar(alpha, max_cvar);
         slf
     }
+
+    /// Load a strategy from YAML text (dimension weights are normalized).
+    #[staticmethod]
+    fn from_yaml(text: &str) -> PyResult<Self> {
+        Ok(Self {
+            builder: quartz_portfolio::Strategy::from_yaml_str(text)
+                .map_err(qerr)?
+                .into(),
+        })
+    }
+
+    /// Load a strategy from JSON text (dimension weights are normalized).
+    #[staticmethod]
+    fn from_json(text: &str) -> PyResult<Self> {
+        Ok(Self {
+            builder: quartz_portfolio::Strategy::from_json_str(text)
+                .map_err(qerr)?
+                .into(),
+        })
+    }
+
+    /// Load a strategy from a .json/.yaml/.yml file.
+    #[staticmethod]
+    fn from_file(path: std::path::PathBuf) -> PyResult<Self> {
+        Ok(Self {
+            builder: quartz_portfolio::Strategy::load(&path).map_err(qerr)?.into(),
+        })
+    }
+
+    /// Serialize the strategy to YAML.
+    fn to_yaml(&self) -> PyResult<String> {
+        self.to_strategy().to_yaml_string().map_err(qerr)
+    }
+
+    /// Serialize the strategy to pretty JSON.
+    fn to_json(&self) -> PyResult<String> {
+        self.to_strategy().to_json_string().map_err(qerr)
+    }
 }
 
 /// A tactical overlay: tightens a strategy's bounds and overrides weights.

@@ -1,5 +1,6 @@
 pub mod batch;
 pub mod compiler;
+pub mod config;
 pub mod constraints;
 pub mod frontier;
 mod math;
@@ -12,6 +13,7 @@ pub mod tactic;
 
 pub use batch::{solve_batch, BatchProblem};
 pub use compiler::compile;
+pub use config::ConfigError;
 pub use frontier::{FrontierExplorer, FrontierPoint, FrontierResult};
 pub use model::PortfolioModel;
 pub use restriction::Restrictions;

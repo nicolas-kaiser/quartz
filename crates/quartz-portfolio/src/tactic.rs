@@ -11,8 +11,11 @@ use crate::strategy::Strategy;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tactic {
     pub name: String,
+    #[serde(default)]
     pub group_overrides: Vec<GroupConstraint>,
+    #[serde(default)]
     pub score_overrides: Vec<ScoreConstraint>,
+    #[serde(default)]
     pub dimension_weight_overrides: HashMap<String, f64>,
 }
 

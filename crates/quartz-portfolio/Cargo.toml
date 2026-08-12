@@ -11,9 +11,8 @@ serde = { workspace = true }
 quartz-core = { path = "../quartz-core" }
 quartz-solver = { path = "../quartz-solver" }
 rayon = { workspace = true, optional = true }
-
-[dev-dependencies]
-serde_json = "1"
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 
 [features]
 default = ["parallel"]

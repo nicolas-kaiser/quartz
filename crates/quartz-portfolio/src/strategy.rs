@@ -11,8 +11,12 @@ use crate::constraints::{CvarConstraint, GroupConstraint, ScoreConstraint, Track
 pub struct Strategy {
     pub name: String,
     pub dimensions: Vec<Dimension>,
+    #[serde(default)]
     pub group_constraints: Vec<GroupConstraint>,
+    #[serde(default)]
     pub score_constraints: Vec<ScoreConstraint>,
+    /// Defaults to true (matching the builder) when absent from a file.
+    #[serde(default = "default_true")]
     pub fully_invested: bool,
     /// Optional tracking-error limit vs a benchmark (SOC constraint).
     #[serde(default)]
@@ -22,7 +26,23 @@ pub struct Strategy {
     pub cvar: Option<CvarConstraint>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Strategy {
+    /// Normalize dimension weights to sum to 1 (idempotent; zero total is
+    /// left untouched). Applied by `StrategyBuilder::build` and the file
+    /// loaders in `config`, but not by raw serde deserialization.
+    pub(crate) fn normalize_dimension_weights(&mut self) {
+        let total: f64 = self.dimensions.iter().map(|d| d.weight).sum();
+        if total > 0.0 && (total - 1.0).abs() > 1e-10 {
+            for d in &mut self.dimensions {
+                d.weight /= total;
+            }
+        }
+    }
+
     pub fn builder(name: impl Into<String>) -> StrategyBuilder {
         StrategyBuilder {
             name: name.into(),
@@ -131,16 +151,8 @@ impl StrategyBuilder {
     }
 
     /// Build the strategy. Normalizes dimension weights to sum to 1.0.
-    pub fn build(mut self) -> Strategy {
-        // Normalize dimension weights
-        let total_weight: f64 = self.dimensions.iter().map(|d| d.weight).sum();
-        if total_weight > 0.0 && (total_weight - 1.0).abs() > 1e-10 {
-            for d in &mut self.dimensions {
-                d.weight /= total_weight;
-            }
-        }
-
-        Strategy {
+    pub fn build(self) -> Strategy {
+        let mut strategy = Strategy {
             name: self.name,
             dimensions: self.dimensions,
             group_constraints: self.group_constraints,
@@ -148,6 +160,24 @@ impl StrategyBuilder {
             fully_invested: self.fully_invested,
             tracking_error: self.tracking_error,
             cvar: self.cvar,
+        };
+        strategy.normalize_dimension_weights();
+        strategy
+    }
+}
+
+/// A Strategy converts back into a builder (used by the Python bindings so
+/// file-loaded strategies remain chainable).
+impl From<Strategy> for StrategyBuilder {
+    fn from(s: Strategy) -> Self {
+        StrategyBuilder {
+            name: s.name,
+            dimensions: s.dimensions,
+            group_constraints: s.group_constraints,
+            score_constraints: s.score_constraints,
+            fully_invested: s.fully_invested,
+            tracking_error: s.tracking_error,
+            cvar: s.cvar,
         }
     }
 }

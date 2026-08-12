@@ -2,8 +2,11 @@ use serde::{Deserialize, Serialize};
 
 /// Direction of optimization for a dimension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Sense {
+    #[serde(alias = "Minimize")]
     Minimize,
+    #[serde(alias = "Maximize")]
     Maximize,
 }
 
@@ -19,7 +22,11 @@ impl Sense {
 }
 
 /// Type of optimization dimension.
+///
+/// Serialized internally tagged so strategy files read naturally:
+/// `type: quadratic` or `type: linear` + `score_key: ...`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum DimensionType {
     /// A linear dimension based on a score key.
     /// The objective contribution is: λ * sense * Σᵢ(wᵢ * scoreᵢ)
@@ -39,6 +46,7 @@ pub struct Dimension {
     /// Human-readable name for this dimension.
     pub name: String,
     /// Type: linear (score-based) or quadratic (covariance-based).
+    #[serde(flatten)]
     pub dim_type: DimensionType,
     /// Whether to minimize or maximize this dimension.
     pub sense: Sense,
@@ -81,6 +89,27 @@ mod tests {
     fn test_sense_sign() {
         assert_eq!(Sense::Minimize.sign(), 1.0);
         assert_eq!(Sense::Maximize.sign(), -1.0);
+    }
+
+    #[test]
+    fn test_serde_shape() {
+        // Human-friendly wire shape: flattened internally-tagged type + lowercase sense
+        let d = Dimension::quadratic("financial_risk", Sense::Minimize, 0.5);
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains(r#""type":"quadratic""#), "{json}");
+        assert!(json.contains(r#""sense":"minimize""#), "{json}");
+
+        let d = Dimension::linear("ret", "expected_return", Sense::Maximize, 0.5);
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains(r#""type":"linear""#), "{json}");
+        assert!(json.contains(r#""score_key":"expected_return""#), "{json}");
+
+        // Old capitalized sense still accepted via alias
+        let d: Dimension = serde_json::from_str(
+            r#"{"name":"x","type":"quadratic","sense":"Minimize","weight":1.0}"#,
+        )
+        .unwrap();
+        assert_eq!(d.sense, Sense::Minimize);
     }
 
     #[test]

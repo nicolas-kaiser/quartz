@@ -6,6 +6,7 @@ use crate::constraints::exclusion::Exclusion;
 ///
 /// These are applied after strategy/tactic merge and override any softer bounds.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Restrictions {
     /// Assets to completely exclude (weight = 0).
     pub exclusions: Vec<Exclusion>,

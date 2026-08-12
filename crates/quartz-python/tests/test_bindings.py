@@ -271,6 +271,43 @@ def test_risk_constraints():
                      restrictions=base_restrictions())
 
 
+def test_strategy_files(tmp_path):
+    yaml_text = """
+name: File strategy
+dimensions:
+- name: financial_risk
+  type: quadratic
+  sense: minimize
+  weight: 50
+- name: expected_return
+  type: linear
+  score_key: expected_return
+  sense: maximize
+  weight: 50
+"""
+    s = quartz.Strategy.from_yaml(yaml_text)
+    sol = quartz.solve(diag_universe(), s, restrictions=base_restrictions())
+    assert sol.status == quartz.SolveStatus.Optimal
+
+    # Round trip + chaining after load still works
+    round_tripped = quartz.Strategy.from_yaml(s.to_yaml())
+    round_tripped = round_tripped.group("currency", "USD", 0.0, 1.0)
+    assert "type: quadratic" in round_tripped.to_yaml()
+    assert '"sense": "maximize"' in s.to_json()
+
+    # from_file with both extensions
+    p = tmp_path / "s.yaml"
+    p.write_text(yaml_text)
+    s2 = quartz.Strategy.from_file(p)
+    sol2 = quartz.solve(diag_universe(), s2, restrictions=base_restrictions())
+    assert abs(sol2.objective_value - sol.objective_value) < 1e-12
+
+    with pytest.raises(quartz.QuartzError):
+        quartz.Strategy.from_yaml("dimensions: {not: [valid")
+    with pytest.raises(quartz.QuartzError):
+        quartz.Strategy.from_file(tmp_path / "missing.toml")
+
+
 def test_tactic():
     assets = [
         quartz.Asset("A", tags={"currency": "USD"}, scores={"expected_return": 0.10}),

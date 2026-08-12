@@ -3,7 +3,11 @@ use quartz_core::Universe;
 use serde::{Deserialize, Serialize};
 
 /// Bound type for a portfolio-level score constraint.
+///
+/// Externally tagged, lowercase — in YAML: `bound: {min: 5.0}`,
+/// `bound: {max: 3.0}`, or `bound: {range: [4.0, 7.0]}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ScoreBound {
     /// Portfolio-weighted score must be ≥ threshold.
     Min(f64),

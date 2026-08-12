@@ -43,6 +43,7 @@ Quartz is a **modeler + compiler**: it translates your high-level portfolio stra
 - **Parallel batch solving** — `solve_batch` runs independent problems on all cores via `rayon` (1000-date backtest in ~13 ms); opt out with `default-features = false`
 - **Python bindings** — `import quartz` (PyO3 + maturin); batch solves release the GIL and run rayon-parallel
 - **OSQP warm-start backend** (optional `osqp` feature) — sequential re-solves (turnover-chained backtests, live re-optimization) seed each solve with the previous solution: `.backend(Backend::Osqp).warm_start(&prev)`
+- **Strategy files** — load/save strategies, tactics, and restrictions as JSON or YAML (`Strategy::load("esg.yaml")`, `quartz.Strategy.from_file(...)` in Python); dimension weights are normalized on load
 - **Pure Rust** — zero C/C++ dependencies, compiles anywhere Rust does
 - **~1ms solve time** — for typical 5-asset problems with full constraint sets
 
@@ -171,6 +172,35 @@ cargo run --release --example backtest -p quartz-portfolio
 
 # Sequential turnover-chained backtest: Clarabel vs OSQP cold vs OSQP warm-started
 cargo run --release --example backtest_warmstart -p quartz-portfolio --features osqp
+
+# Load a strategy from a YAML file and solve with it
+cargo run --example strategy_file -p quartz-portfolio
+```
+
+## Strategy files
+
+Strategies are loadable from hand-written YAML (or JSON) — see
+[`crates/quartz-portfolio/examples/strategies/esg_balanced.yaml`](crates/quartz-portfolio/examples/strategies/esg_balanced.yaml):
+
+```yaml
+name: ESG Balanced
+dimensions:
+- name: financial_risk
+  type: quadratic
+  sense: minimize
+  weight: 40            # relative weights fine — normalized on load
+- name: expected_return
+  type: linear
+  score_key: expected_return
+  sense: maximize
+  weight: 60
+score_constraints:
+- score_key: environmental_impact
+  bound: !min 7.0
+```
+
+```rust
+let strategy = Strategy::load("esg_balanced.yaml")?;
 ```
 
 ## Python
@@ -224,7 +254,7 @@ Requires **Rust stable** (edition 2021). No C/C++ toolchain needed for the defau
 - [x] Python bindings via PyO3 + maturin
 - [x] OSQP backend for warm-start support
 - [x] SOCP support for CVaR and tracking error constraints
-- [ ] JSON/YAML strategy file loading
+- [x] JSON/YAML strategy file loading
 
 ## License
 

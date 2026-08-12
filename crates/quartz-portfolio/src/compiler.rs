@@ -743,6 +743,20 @@ mod tests {
         let s: Strategy = serde_json::from_str(old_json).unwrap();
         assert!(s.tracking_error.is_none() && s.cvar.is_none());
 
+        // Current wire shape: flattened internally-tagged dimension type,
+        // lowercase sense (the format used by strategy files)
+        let new_json = r#"{
+            "name": "New shape",
+            "dimensions": [
+                {"name": "financial_risk", "type": "quadratic", "sense": "minimize", "weight": 0.5},
+                {"name": "ret", "type": "linear", "score_key": "expected_return", "sense": "maximize", "weight": 0.5}
+            ]
+        }"#;
+        let s: Strategy = serde_json::from_str(new_json).unwrap();
+        assert_eq!(s.dimensions.len(), 2);
+        assert!(matches!(s.dimensions[0].dim_type, DimensionType::Quadratic));
+        assert!(s.fully_invested); // serde default matches the builder
+
         // Round trip with the fields set
         let s = Strategy::builder("New")
             .minimize_risk(1.0)

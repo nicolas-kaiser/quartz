@@ -467,6 +467,20 @@ with tab_opt:
     with st.expander("Problem spec sent to Rust (JSON)"):
         st.json(spec)
 
+    with st.expander("Strategy file (YAML)"):
+        st.caption(
+            "The current strategy as a loadable YAML file "
+            "(`quartz.Strategy.from_file(...)` / `Strategy::load(...)`). "
+            "Note: the demo drives fully-invested via Restrictions, so the "
+            "strategy itself shows the builder default."
+        )
+        strategy_yaml = _build_strategy(spec["strategy"]).to_yaml()
+        st.code(strategy_yaml, language="yaml")
+        st.download_button(
+            "Download strategy.yaml", strategy_yaml,
+            file_name="strategy.yaml", mime="text/yaml",
+        )
+
 with tab_frontier:
     st.caption(
         "Sweep two objectives against each other while all other dimension "

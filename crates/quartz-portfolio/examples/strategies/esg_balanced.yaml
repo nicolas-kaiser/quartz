@@ -1,0 +1,23 @@
+# A hand-authored Quartz strategy file.
+# Load with Strategy::load("....yaml") or quartz.Strategy.from_file(...) in Python.
+# Dimension weights are normalized to sum to 1 on load, so relative values work.
+name: ESG Balanced
+dimensions:
+- name: financial_risk
+  type: quadratic
+  sense: minimize
+  weight: 40
+- name: expected_return
+  type: linear
+  score_key: expected_return
+  sense: maximize
+  weight: 30
+- name: environmental_impact
+  type: linear
+  score_key: environmental_impact
+  sense: maximize
+  weight: 30
+score_constraints:
+- score_key: environmental_impact
+  bound: !min 7.0
+fully_invested: true
