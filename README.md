@@ -1,7 +1,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/rust-stable-orange?logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/python-3.9%2B-blue?logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License">
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
   <img src="https://img.shields.io/badge/solvers-Clarabel%20%7C%20OSQP-green" alt="Solvers">
 </p>
 
@@ -350,8 +350,6 @@ per-date scenarios in the demo backtest, cardinality constraints (MIP).
 
 ## License
 
-Quartz is licensed under the **GNU Affero General Public License v3.0** (AGPL-3.0).
-
-This means you are free to use, modify, and distribute Quartz, but any modified version — including use over a network (SaaS) — **must also be released under AGPL-3.0** with source code available.
+Quartz is licensed under the **MIT License**: you are free to use, modify and distribute it, including in proprietary software and network services, provided the copyright and license notice is kept.
 
 See [LICENSE](LICENSE) for the full text.

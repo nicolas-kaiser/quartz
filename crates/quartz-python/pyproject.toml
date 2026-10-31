@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "quartz"
 description = "Multi-dimensional portfolio optimizer (Rust core, Clarabel QP)"
 requires-python = ">=3.9"
-license = { text = "AGPL-3.0" }
+license = { text = "MIT" }
 dynamic = ["version"]
 # numpy is optional: list-of-lists matrix inputs work without it
 dependencies = []

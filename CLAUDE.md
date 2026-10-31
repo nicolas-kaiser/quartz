@@ -8,7 +8,7 @@ All code lives in the `quartz/` subdirectory — that is the git repository and 
 
 ## What Quartz is
 
-A multi-dimensional portfolio optimizer in Rust. It is a **modeler + compiler**, not a solver: it translates high-level portfolio strategies (risk, return, ESG scores, climate risk, custom dimensions) into a quadratic program `min ½xᵀPx + qᵀx s.t. Ax + s = b, s ∈ K` and delegates solving to Clarabel.rs. Licensed AGPL-3.0.
+A multi-dimensional portfolio optimizer in Rust. It is a **modeler + compiler**, not a solver: it translates high-level portfolio strategies (risk, return, ESG scores, climate risk, custom dimensions) into a quadratic program `min ½xᵀPx + qᵀx s.t. Ax + s = b, s ∈ K` and delegates solving to Clarabel.rs. Licensed MIT.
 
 ## Commands
 

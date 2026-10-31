@@ -59,4 +59,4 @@ cargo run --example multi_dimension -p quartz-portfolio  # Multi-dim ESG 5 asset
 
 ## License
 
-AGPL-3.0 — all modifications must be published.
+MIT — see LICENSE.
