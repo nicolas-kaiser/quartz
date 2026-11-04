@@ -7,19 +7,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// This introduces n auxiliary variables t (one per asset), expanding
 /// the decision vector from [w] (n) to [w, t] (2n).
-///
-/// Optionally, `transaction_cost_rates` adds a linear cost `Σᵢ cᵢ·tᵢ` to the
-/// objective so the optimizer naturally trades-off improvement against cost.
-/// See `quartz/docs/transaction-costs.md` for details.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnoverConstraint {
     pub previous_weights: Vec<f64>,
     pub max_turnover: f64,
-    /// Per-asset transaction cost coefficients (one per asset, in objective units).
-    /// When set, `q[n + i] += transaction_cost_rates[i]` is applied in the compiler.
-    /// Must have the same length as `previous_weights`. `None` = no cost (default).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transaction_cost_rates: Option<Vec<f64>>,
 }
 
 impl TurnoverConstraint {
@@ -27,17 +18,7 @@ impl TurnoverConstraint {
         Self {
             previous_weights,
             max_turnover,
-            transaction_cost_rates: None,
         }
-    }
-
-    /// Attach per-asset transaction cost rates to this constraint.
-    ///
-    /// The rates are added to the objective as `Σᵢ cᵢ·tᵢ` where `tᵢ = |wᵢ − wᵢ_prev|`.
-    /// Must have the same length as `previous_weights`; validated in `compile()`.
-    pub fn with_costs(mut self, rates: Vec<f64>) -> Self {
-        self.transaction_cost_rates = Some(rates);
-        self
     }
 
     /// Compile turnover constraints.

@@ -1,68 +1,70 @@
-# Transaction costs in the quartz objective
+# Transaction costs ("net of costs" scores)
 
-## Why costs belong in the objective
+Trading has a cost. With transaction costs, quartz optimises a score — typically expected
+return — **net of the cost of getting there** from the current portfolio, instead of capping
+turnover with an arbitrary limit and pricing the trades afterwards.
 
-Historically the turnover constraint capped `Σ|wᵢ − wᵢ_prev|` at a fixed limit and fees were
-computed after the fact. This has two problems:
+## Model
 
-1. The cap is arbitrary — it doesn't reflect the actual cost of trading.
-2. It treats all assets the same: a 1% trade in a liquid equity costs the same as a 1% trade
-   in a thinly-traded bond, even though the real fee can differ by an order of magnitude.
-
-The clean solution is to include transaction costs directly in the objective:
-
-```
-min  λ·wᵀΣw  −  μᵀw  +  Σᵢ cᵢ·tᵢ
-```
-
-where `tᵢ = |wᵢ − wᵢ_prev|` are the turnover auxiliary variables.  The optimizer then naturally
-trades exactly as much as the improvement justifies.  No calibration of a turnover cap is needed
-(though `max_turnover` remains a valid hard safety rail when wanted).
-
-## Math
-
-### Variable layout
-
-When a `TurnoverConstraint` is present, quartz extends the decision vector to
-`x = [w₁…wₙ, t₁…tₙ, (y…), (ζ,u…)]`.  The `tᵢ` variables sit at columns `n..2n`.
-
-The constraint compiler encodes `tᵢ ≥ |wᵢ − wᵢ_prev|` as three groups of inequality rows:
-
-| rows | meaning |
-|------|---------|
-| `wᵢ − tᵢ ≤ wᵢ_prev` | upper bound on change |
-| `−wᵢ − tᵢ ≤ −wᵢ_prev` | lower bound on change |
-| `−tᵢ ≤ 0` | non-negativity of t |
-| `Σtᵢ ≤ T` | optional total-turnover cap |
-
-### Cost term
-
-Adding `Σᵢ cᵢ·tᵢ` to the objective is a purely linear change to the `q` vector:
+Costs need a turnover constraint, whose auxiliary variables `tᵢ ≥ |wᵢ − wᵢ_prev|` sit at
+columns `n..2n` of the decision vector `[w, t, (y), (ζ, u)]`. A `TransactionCosts` value names
+the score the costs reduce and the per-asset rates:
 
 ```
-q[n + i]  +=  cᵢ
+TransactionCosts { rates: [c₁ … cₙ], score_key: "expected_return" }
+net score  =  sᵀw − cᵀt
 ```
 
-No new variables, no new constraints, no change to the sparsity pattern.  When all `cᵢ = 0`
-(i.e. `transaction_cost_rates` is absent) the QP is bit-identical to the previous behaviour.
+`cᵢ` is in the units of `score_key` per unit of weight traded. For an annualised expected
+return and a one-off fee `fᵢ` (fraction of the amount traded) spread over a holding period of
+`H` years, `cᵢ = fᵢ / H`: a 10 bp fee kept for 2 years costs 5 bp of return a year.
 
-### Holding-period scaling
+### Where the score becomes net
 
-The cost per unit of weight change is the fee rate (a fraction of notional, e.g. 10 bp = 0.001).
-To make this commensurable with an annualised expected return, it must be amortised over the
-holding period H (years):
+Clarabel solves `min ½xᵀPx + qᵀx` with `P = (Σ_quad sign·weight)·Σ` and `q_w = Σ_linear
+sign·weight·s`; the builder and the file loaders normalise dimension weights to sum to 1.
+The cost enters exactly where the strategy wants **more** of `score_key`:
 
-```
-cᵢ = fee_rate[asset_class_i] / H
-```
+| strategy element on `score_key` | effect of costs |
+|---|---|
+| linear dimension, `maximize`, weight `ω` | objective `−ω·(sᵀw − cᵀt)`: `q[n+i] += ω·cᵢ` |
+| `score_min(θ)`, lower side of a range | `sᵀw − cᵀt ≥ θ`: `+cᵢ` on `tᵢ` in that row |
+| linear dimension, `minimize` | gross (unchanged) |
+| `score_max(θ)`, upper side of a range | gross (unchanged) |
+| quadratic (risk) dimension | unchanged — risk is not in return units |
 
-A 10 bp fee amortised over 2 years = 5 bp per year, comparable to a 5 bp improvement in
-expected return.  Setting H = 1 is a neutral default that neither over- nor under-penalises
-trading.
+The cost is weighted like the score it reduces, so a mixed strategy (`0.5` risk, `0.5` return)
+trades risk against **net** return in the same proportion as against gross return.
+
+Costs stay out of minimised scores and upper bounds on purpose: `t` is only a lower bound on
+`|Δw|`, and the solver keeps it tight only when a larger `t` hurts. In a row where a larger `t`
+would help, the solver could inflate `t` (up to the turnover cap) and the "net" figure would be
+meaningless.
+
+Consequences:
+
+- A pure `minimize_risk` strategy is unaffected by costs, unless a `score_min` on `score_key`
+  binds: the minimum-risk portfolio does not depend on what trading costs.
+- "Minimum risk at a target return" with costs is minimum risk at a target **net** return
+  (`score_min` row) — the efficient frontier reachable from today's portfolio after costs.
+- Nothing else changes: no new variables, rows or cones; with no costs the QP is the same as
+  without the feature.
+
+### Caps
+
+`TurnoverConstraint::max_turnover` stays a hard cap on `Σtᵢ`. To price trades without capping
+them, pass a cap that cannot bind: between two fully invested long-only portfolios
+`Σ|wᵢ − wᵢ_prev| ≤ 2`, so `2.0` is never active.
+
+## Validation (compile time)
+
+| error | when |
+|---|---|
+| `TransactionCostsWithoutTurnover` | costs without a turnover constraint |
+| `TransactionCostDimensionMismatch` | `rates.len() != n_assets` |
+| `InvalidTransactionCost { index, value }` | a rate is negative, NaN or infinite |
 
 ## Rust API
-
-### Building a constrained solve with costs
 
 ```rust
 use quartz_portfolio::{PortfolioModel, Restrictions};
@@ -70,76 +72,42 @@ use quartz_portfolio::{PortfolioModel, Restrictions};
 let solution = PortfolioModel::new(&universe)
     .strategy(&strategy)
     .restrictions(Restrictions::builder().long_only().fully_invested().build())
-    .turnover(previous_weights.clone(), 0.30)   // optional hard cap
-    .transaction_cost_rates(cost_rates)          // per-asset cᵢ
+    .turnover(previous_weights.clone(), 2.0)              // 2.0: price, don't cap
+    .transaction_costs(rates, "expected_return")          // any order w.r.t. turnover()
     .solve()?;
 ```
 
-`transaction_cost_rates` must be called **after** `.turnover()`.  Calling it before is a no-op
-(the `TurnoverConstraint` doesn't exist yet).
-
-### `TurnoverConstraint::with_costs`
-
-```rust
-let tc = TurnoverConstraint::new(previous_weights, max_turnover)
-    .with_costs(cost_rates);
-```
-
-### Batch solving
-
-```rust
-let p = BatchProblem::new(&universe, &strategy)
-    .restrictions(r)
-    .turnover(prev, 0.30)
-    .transaction_cost_rates(cost_rates);
-```
+`BatchProblem::transaction_costs(rates, key)` and `FrontierExplorer::transaction_costs(rates, key)`
+do the same per batch item / for every explored point. Lower level:
+`compile_with_costs(universe, strategy, tactic, restrictions, turnover, Some(&costs))`
+(`compile` is `compile_with_costs(.., None)`).
 
 ## Python API
 
-```python
-solution = quartz.solve(
-    universe, strategy,
-    restrictions=restrictions,
-    turnover=(prev_weights, 0.30),          # optional hard cap
-    transaction_cost_rates=cost_rates,      # list[float], one per asset
-)
-
-# or in a batch:
-problem = quartz.Problem(
-    universe, strategy,
-    restrictions=restrictions,
-    turnover=(prev_weights, 0.30),
-    transaction_cost_rates=cost_rates,
-)
-solutions = quartz.solve_batch([problem])
-```
-
-`transaction_cost_rates` is silently ignored when `turnover` is not set (there are no `t`
-variables to attach costs to).
-
-## Integration in the PPI Simulation Studio
-
-The API layer (`ip_ppi_api/app/models/simulation.py`) exposes a `holding_period` run parameter
-(years, optional).  When set:
+`transaction_costs=(rates, score_key)` on `solve`, `Problem` (for `solve_batch`), `sweep` and
+`simplex_grid`, next to `turnover=(previous_weights, max_turnover)`. Invalid input raises
+`QuartzError`.
 
 ```python
-c_i = fee_rate[asset_class_i] / holding_period
+sol = quartz.solve(
+    universe, strategy,
+    restrictions=restrictions,
+    turnover=(prev_weights, 2.0),
+    transaction_costs=([fee / holding_years for fee in fees], "expected_return"),
+)
 ```
 
-Fee rates come from the tenant's historical transaction data (median `|fee/amount|` over 2 years,
-per asset class), falling back to 10 bp for sparse histories and 0 for cash-like classes.  The
-`holding_period` field is disabled for the `closest_compliant` objective and for cash-flow runs
-(same logic as `max_turnover`).
+## Example
 
-## Interaction with `max_turnover`
+Returns 10 % / 5 % / 3 %, equal variances, held ⅓ each, maximise return, uniform cost 3 %:
+moving C → A gains 7 % for 2 × 3 % of cost and happens; B → A gains 5 % < 6 % and does not.
+The answer is `[⅔, ⅓, 0]` instead of `[1, 0, 0]` without costs
+(`test_transaction_costs_trade_only_where_the_gain_pays`, in Rust and Python).
 
-The two controls are complementary:
+## History
 
-| scenario | recommendation |
-|----------|---------------|
-| costs only | optimizer self-limits; no hard cap needed |
-| costs + cap | use the cap as a risk-management guardrail |
-| cap only (legacy) | unchanged behaviour when `holding_period` is absent |
-
-When both are set the optimizer minimises cost subject to the cap.  The cap may be slack (never
-binding) if the cost alone deters the optimizer from trading that much.
+- `ffa8540` first added `transaction_cost_rates`, an unscaled `q[n+i] += cᵢ` on the turnover
+  constraint. It mixed units (a return-unit cost against ½·variance in every minimum-risk
+  solve), was silently dropped without a prior `turnover()` call and accepted negative or NaN
+  rates. Replaced by `TransactionCosts` (net of costs on a named score); the old keyword
+  `transaction_cost_rates` no longer exists.

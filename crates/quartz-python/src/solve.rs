@@ -91,9 +91,13 @@ fn settings(max_iter: u32, verbose: bool) -> SolverSettings {
 }
 
 /// Solve a single portfolio optimization problem.
+///
+/// `turnover=(previous_weights, max_turnover)`; `transaction_costs=(rates, score_key)`
+/// makes `score_key` net of `Σ rates[i]·|w_i − previous_i|` wherever the strategy
+/// wants more of it (needs `turnover`; see `docs/transaction-costs.md`).
 #[pyfunction]
 #[pyo3(signature = (universe, strategy, *, tactic=None, restrictions=None, turnover=None,
-                    transaction_cost_rates=None, max_iter=200, verbose=false))]
+                    transaction_costs=None, max_iter=200, verbose=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve(
     py: Python<'_>,
@@ -102,7 +106,7 @@ pub fn solve(
     tactic: Option<&Tactic>,
     restrictions: Option<&Restrictions>,
     turnover: Option<(Vec<f64>, f64)>,
-    transaction_cost_rates: Option<Vec<f64>>,
+    transaction_costs: Option<(Vec<f64>, String)>,
     max_iter: u32,
     verbose: bool,
 ) -> PyResult<Solution> {
@@ -123,9 +127,9 @@ pub fn solve(
         }
         if let Some((prev, max)) = turnover {
             model = model.turnover(prev, max);
-            if let Some(costs) = transaction_cost_rates {
-                model = model.transaction_cost_rates(costs);
-            }
+        }
+        if let Some((rates, key)) = transaction_costs {
+            model = model.transaction_costs(rates, key);
         }
         model.solve()
     });
@@ -145,7 +149,7 @@ struct OwnedItem {
     tactic: Option<quartz_portfolio::Tactic>,
     restrictions: RRestrictions,
     turnover: Option<(Vec<f64>, f64)>,
-    transaction_cost_rates: Option<Vec<f64>>,
+    transaction_costs: Option<(Vec<f64>, String)>,
 }
 
 /// Solve many independent problems in parallel (rayon; the GIL is released).
@@ -180,7 +184,7 @@ pub fn solve_batch(
                     .clone()
                     .unwrap_or_else(|| default_r.clone()),
                 turnover: p.turnover.clone(),
-                transaction_cost_rates: p.transaction_cost_rates.clone(),
+                transaction_costs: p.transaction_costs.clone(),
             },
             BatchInput::Pair(u, s) => OwnedItem {
                 universe: u.inner.clone(),
@@ -188,7 +192,7 @@ pub fn solve_batch(
                 tactic: default_t.clone(),
                 restrictions: default_r.clone(),
                 turnover: None,
-                transaction_cost_rates: None,
+                transaction_costs: None,
             },
         })
         .collect();
@@ -205,9 +209,9 @@ pub fn solve_batch(
                 }
                 if let Some((prev, max)) = &item.turnover {
                     p = p.turnover(prev.clone(), *max);
-                    if let Some(costs) = &item.transaction_cost_rates {
-                        p = p.transaction_cost_rates(costs.clone());
-                    }
+                }
+                if let Some((rates, key)) = &item.transaction_costs {
+                    p = p.transaction_costs(rates.clone(), key.clone());
                 }
                 p
             })
@@ -322,7 +326,7 @@ fn frontier_from_rust(
 #[pyfunction]
 #[pyo3(signature = (universe, strategy, dim_a, dim_b, n_points=25, *,
                     tactic=None, restrictions=None, turnover=None,
-                    transaction_cost_rates=None))]
+                    transaction_costs=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn sweep(
     py: Python<'_>,
@@ -334,7 +338,7 @@ pub fn sweep(
     tactic: Option<&Tactic>,
     restrictions: Option<&Restrictions>,
     turnover: Option<(Vec<f64>, f64)>,
-    transaction_cost_rates: Option<Vec<f64>>,
+    transaction_costs: Option<(Vec<f64>, String)>,
 ) -> PyResult<Frontier> {
     let u = universe.inner.clone();
     let s = strategy.to_strategy();
@@ -349,9 +353,9 @@ pub fn sweep(
         }
         if let Some((prev, max)) = turnover {
             explorer = explorer.turnover(prev, max);
-            if let Some(costs) = transaction_cost_rates {
-                explorer = explorer.transaction_cost_rates(costs);
-            }
+        }
+        if let Some((rates, key)) = transaction_costs {
+            explorer = explorer.transaction_costs(rates, key);
         }
         explorer.sweep(&dim_a, &dim_b, n_points)
     });
@@ -362,7 +366,8 @@ pub fn sweep(
 #[pyfunction]
 #[pyo3(signature = (universe, strategy, resolution=5, *,
                     tactic=None, restrictions=None, turnover=None,
-                    transaction_cost_rates=None))]
+                    transaction_costs=None))]
+#[allow(clippy::too_many_arguments)]
 pub fn simplex_grid(
     py: Python<'_>,
     universe: &Universe,
@@ -371,7 +376,7 @@ pub fn simplex_grid(
     tactic: Option<&Tactic>,
     restrictions: Option<&Restrictions>,
     turnover: Option<(Vec<f64>, f64)>,
-    transaction_cost_rates: Option<Vec<f64>>,
+    transaction_costs: Option<(Vec<f64>, String)>,
 ) -> PyResult<Frontier> {
     let u = universe.inner.clone();
     let s = strategy.to_strategy();
@@ -385,9 +390,9 @@ pub fn simplex_grid(
         }
         if let Some((prev, max)) = turnover {
             explorer = explorer.turnover(prev, max);
-            if let Some(costs) = transaction_cost_rates {
-                explorer = explorer.transaction_cost_rates(costs);
-            }
+        }
+        if let Some((rates, key)) = transaction_costs {
+            explorer = explorer.transaction_costs(rates, key);
         }
         explorer.simplex_grid(resolution)
     });

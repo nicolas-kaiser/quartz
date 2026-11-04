@@ -1,5 +1,6 @@
 pub mod allocation;
 pub mod bounds;
+pub mod costs;
 pub mod cvar;
 pub mod exclusion;
 pub mod factor;
@@ -9,6 +10,7 @@ pub mod turnover;
 
 pub use allocation::{FullyInvested, GroupConstraint};
 pub use bounds::WeightBounds;
+pub use costs::TransactionCosts;
 pub use cvar::CvarConstraint;
 pub use exclusion::Exclusion;
 pub use factor::FactorLink;

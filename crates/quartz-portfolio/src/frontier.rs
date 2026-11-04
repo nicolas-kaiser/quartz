@@ -118,7 +118,7 @@ pub struct FrontierExplorer<'a> {
     tactic: Option<&'a Tactic>,
     restrictions: Restrictions,
     turnover: Option<(Vec<f64>, f64)>,
-    transaction_cost_rates: Option<Vec<f64>>,
+    transaction_costs: Option<(Vec<f64>, String)>,
 }
 
 impl<'a> FrontierExplorer<'a> {
@@ -129,7 +129,7 @@ impl<'a> FrontierExplorer<'a> {
             tactic: None,
             restrictions: Restrictions::default(),
             turnover: None,
-            transaction_cost_rates: None,
+            transaction_costs: None,
         }
     }
 
@@ -148,10 +148,9 @@ impl<'a> FrontierExplorer<'a> {
         self
     }
 
-    /// Attach per-asset transaction cost rates (applied to every explored point).
-    /// Must be called after `.turnover()`; silently ignored when turnover is not set.
-    pub fn transaction_cost_rates(mut self, rates: Vec<f64>) -> Self {
-        self.transaction_cost_rates = Some(rates);
+    /// Transaction costs for every explored point (see [`PortfolioModel::transaction_costs`]).
+    pub fn transaction_costs(mut self, rates: Vec<f64>, score_key: impl Into<String>) -> Self {
+        self.transaction_costs = Some((rates, score_key.into()));
         self
     }
 
@@ -288,9 +287,9 @@ impl<'a> FrontierExplorer<'a> {
             .restrictions(self.restrictions.clone());
         if let Some((prev, max)) = &self.turnover {
             model = model.turnover(prev.clone(), *max);
-            if let Some(costs) = &self.transaction_cost_rates {
-                model = model.transaction_cost_rates(costs.clone());
-            }
+        }
+        if let Some((rates, key)) = &self.transaction_costs {
+            model = model.transaction_costs(rates.clone(), key.clone());
         }
         let sol = model.solve()?;
         if sol.status != SolveStatus::Optimal {

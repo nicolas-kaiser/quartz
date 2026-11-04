@@ -12,7 +12,8 @@ pub mod strategy;
 pub mod tactic;
 
 pub use batch::{solve_batch, BatchProblem};
-pub use compiler::compile;
+pub use compiler::{compile, compile_with_costs};
+pub use constraints::TransactionCosts;
 pub use config::ConfigError;
 pub use frontier::{FrontierExplorer, FrontierPoint, FrontierResult};
 pub use model::PortfolioModel;

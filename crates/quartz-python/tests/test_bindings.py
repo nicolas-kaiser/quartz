@@ -308,26 +308,68 @@ dimensions:
         quartz.Strategy.from_file(tmp_path / "missing.toml")
 
 
-def test_transaction_cost_rates():
-    # An asset with a high fee cost should trade less than without costs.
-    # 3 assets, equal covariance; A has higher return but asset A gets a 30% cost.
-    # Without costs: max-return picks mostly A.  With costs: A trades less.
-    u = diag_universe()  # A=0.10, B=0.05, C=0.03; prev weights all zero implied
-    prev = [1 / 3, 1 / 3, 1 / 3]
-    s = quartz.Strategy("MaxRet").maximize("expected_return", 1.0).minimize_risk(1e-6)
+PREV = [1 / 3, 1 / 3, 1 / 3]
 
-    sol_free = quartz.solve(u, s, restrictions=base_restrictions(), turnover=(prev, 1.0))
-    assert sol_free.status == quartz.SolveStatus.Optimal
 
-    # High fee on A: c_A = 0.30, others 0
-    sol_costly = quartz.solve(u, s, restrictions=base_restrictions(),
-                              turnover=(prev, 1.0),
-                              transaction_cost_rates=[0.30, 0.0, 0.0])
-    assert sol_costly.status == quartz.SolveStatus.Optimal
-    # Costs discourage trading A away from its current weight
-    delta_free = abs(sol_free.weights_vec[0] - prev[0])
-    delta_costly = abs(sol_costly.weights_vec[0] - prev[0])
-    assert delta_costly < delta_free
+def _max_return(costs=None):
+    s = quartz.Strategy("MaxRet").maximize("expected_return", 1.0)
+    kw = {} if costs is None else {"transaction_costs": (costs, "expected_return")}
+    sol = quartz.solve(diag_universe(), s, restrictions=base_restrictions(),
+                       turnover=(PREV, 2.0), **kw)
+    assert sol.status == quartz.SolveStatus.Optimal
+    return sol
+
+
+def test_transaction_costs_trade_only_where_the_gain_pays():
+    # returns 10/5/3 %, held 1/3 each, a cap of 2.0 never binds
+    assert _max_return().weights_vec == pytest.approx([1, 0, 0], abs=1e-4)
+    # C->A gains 7% for 2x3% of costs, B->A 5% < 6%: B stays
+    sol = _max_return([0.03] * 3)
+    assert sol.weights_vec == pytest.approx([2 / 3, 1 / 3, 0], abs=1e-4)
+    # objective = -(net return) = -(0.08333 - 0.03 * (1/3 + 1/3))
+    assert sol.objective_value == pytest.approx(-0.06333, abs=1e-4)
+    # A is too dear to buy; C->B gains 2% for free (catches costs on the wrong asset)
+    assert _max_return([0.3, 0, 0]).weights_vec == pytest.approx([1 / 3, 2 / 3, 0], abs=1e-4)
+
+
+def test_transaction_costs_make_a_return_minimum_net():
+    rates = [0.02] * 3
+    s = quartz.Strategy("MinVar").minimize_risk(1.0).score_min("expected_return", 0.07)
+    sol = quartz.solve(diag_universe(), s, restrictions=base_restrictions(),
+                       turnover=(PREV, 2.0), transaction_costs=(rates, "expected_return"))
+    assert sol.status == quartz.SolveStatus.Optimal
+    w, mu = sol.weights_vec, [0.10, 0.05, 0.03]
+    net = sum(m * x - c * abs(x - p) for m, x, c, p in zip(mu, w, rates, PREV))
+    assert net >= 0.07 - 1e-6
+
+
+def test_transaction_costs_in_batch_and_sweep():
+    u, r = diag_universe(), base_restrictions()
+    s = quartz.Strategy("MaxRet").maximize("expected_return", 1.0)
+    free, costly = quartz.solve_batch([
+        quartz.Problem(u, s, restrictions=r, turnover=(PREV, 2.0)),
+        quartz.Problem(u, s, restrictions=r, turnover=(PREV, 2.0),
+                       transaction_costs=([0.03] * 3, "expected_return")),
+    ])
+    assert free.weights_vec == pytest.approx([1, 0, 0], abs=1e-4)
+    assert costly.weights_vec == pytest.approx([2 / 3, 1 / 3, 0], abs=1e-4)
+    mixed = quartz.Strategy("Mix").minimize_risk(0.5).maximize("expected_return", 0.5)
+    f = quartz.sweep(u, mixed, "financial_risk", "expected_return", n_points=3,
+                     restrictions=r, turnover=(PREV, 2.0),
+                     transaction_costs=([0.04] * 3, "expected_return"))
+    assert len(f.points) == 3
+
+
+@pytest.mark.parametrize("kw, match", [
+    ({"transaction_costs": ([0.01] * 3, "expected_return")}, "turnover"),
+    ({"turnover": (PREV, 2.0), "transaction_costs": ([0.01] * 2, "expected_return")}, "length"),
+    ({"turnover": (PREV, 2.0), "transaction_costs": ([0.01, float("nan"), 0], "expected_return")}, "finite"),
+    ({"turnover": (PREV, 2.0), "transaction_costs": ([-0.01, 0, 0], "expected_return")}, "finite"),
+])
+def test_transaction_costs_bad_input(kw, match):
+    s = quartz.Strategy("MaxRet").maximize("expected_return", 1.0)
+    with pytest.raises(quartz.QuartzError, match=match):
+        quartz.solve(diag_universe(), s, restrictions=base_restrictions(), **kw)
 
 
 def test_tactic():

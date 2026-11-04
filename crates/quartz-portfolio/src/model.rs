@@ -4,7 +4,7 @@ use quartz_core::{DimensionType, Universe};
 use quartz_solver::{self, Backend, SolverSettings, WarmStart};
 
 use crate::compiler::{self, CompileError};
-use crate::constraints::TurnoverConstraint;
+use crate::constraints::{TransactionCosts, TurnoverConstraint};
 use crate::restriction::Restrictions;
 use crate::solution::PortfolioSolution;
 use crate::strategy::Strategy;
@@ -55,6 +55,7 @@ pub struct PortfolioModel<'a> {
     tactic: Option<&'a Tactic>,
     restrictions: Restrictions,
     turnover: Option<TurnoverConstraint>,
+    transaction_costs: Option<TransactionCosts>,
     solver_settings: SolverSettings,
     backend: Backend,
     warm_start: Option<WarmStart>,
@@ -68,6 +69,7 @@ impl<'a> PortfolioModel<'a> {
             tactic: None,
             restrictions: Restrictions::default(),
             turnover: None,
+            transaction_costs: None,
             solver_settings: SolverSettings::default(),
             backend: Backend::default(),
             warm_start: None,
@@ -94,15 +96,11 @@ impl<'a> PortfolioModel<'a> {
         self
     }
 
-    /// Attach per-asset transaction cost rates to the turnover constraint.
-    ///
-    /// Must be called **after** `.turnover()`. Calling before is a no-op because
-    /// there is no `TurnoverConstraint` to attach the rates to yet.
-    /// Length is validated at compile time (see `CompileError::TransactionCostDimensionMismatch`).
-    pub fn transaction_cost_rates(mut self, rates: Vec<f64>) -> Self {
-        if let Some(tc) = self.turnover.as_mut() {
-            tc.transaction_cost_rates = Some(rates);
-        }
+    /// Transaction costs: `score_key` becomes net of `Σᵢ rates[i]·|wᵢ − wᵢ_prev|`
+    /// wherever the strategy wants more of it (see [`TransactionCosts`]).
+    /// Needs [`turnover`](Self::turnover) (in any order); checked at solve time.
+    pub fn transaction_costs(mut self, rates: Vec<f64>, score_key: impl Into<String>) -> Self {
+        self.transaction_costs = Some(TransactionCosts::new(rates, score_key));
         self
     }
 
@@ -142,12 +140,13 @@ impl<'a> PortfolioModel<'a> {
         ))?;
 
         // Compile to QP
-        let problem = compiler::compile(
+        let problem = compiler::compile_with_costs(
             self.universe,
             strategy,
             self.tactic,
             &self.restrictions,
             self.turnover.as_ref(),
+            self.transaction_costs.as_ref(),
         )?;
 
         let n = problem.n_assets;
@@ -720,5 +719,108 @@ mod tests {
         let vd = compute_portfolio_variance(&dense_universe(), &w);
         assert!((vf - expected).abs() < 1e-12, "factor arm: {vf} vs {expected}");
         assert!((vd - expected).abs() < 1e-12, "full arm: {vd} vs {expected}");
+    }
+
+    // ---- transaction costs -------------------------------------------------
+
+    use crate::solution::SolveStatus;
+
+    /// Equal-variance universe: returns 10%, 5%, 3%, today 1/3 each.
+    fn cost_universe() -> Universe {
+        Universe::builder()
+            .assets(assets())
+            .covariance_full(CscMatrix::from(&[
+                [0.04, 0.0, 0.0],
+                [0.0, 0.04, 0.0],
+                [0.0, 0.0, 0.04],
+            ]))
+            .build()
+            .unwrap()
+    }
+
+    const PREV: [f64; 3] = [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0];
+
+    fn max_return(rates: Option<Vec<f64>>) -> Vec<f64> {
+        let universe = cost_universe();
+        let strategy = Strategy::builder("Max").maximize("expected_return", 1.0).build();
+        let mut model = PortfolioModel::new(&universe)
+            .strategy(&strategy)
+            .restrictions(Restrictions::builder().long_only().fully_invested().build());
+        if let Some(r) = rates {
+            // costs before turnover: the order does not matter
+            model = model.transaction_costs(r, "expected_return");
+        }
+        let sol = model.turnover(PREV.to_vec(), 2.0).solve().unwrap();
+        assert_eq!(sol.status, SolveStatus::Optimal);
+        sol.weights_vec
+    }
+
+    fn assert_close(got: &[f64], want: &[f64]) {
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 1e-4, "{got:?} != {want:?}");
+        }
+    }
+
+    #[test]
+    fn test_costs_trade_only_where_the_gain_pays() {
+        assert_close(&max_return(None), &[1.0, 0.0, 0.0]);
+        // C→A gains 7% for 2×3% of costs, B→A 5% < 6%: B stays
+        assert_close(&max_return(Some(vec![0.03; 3])), &[2.0 / 3.0, 1.0 / 3.0, 0.0]);
+        // A is too dear to buy; C→B gains 2% for free
+        assert_close(&max_return(Some(vec![0.3, 0.0, 0.0])), &[1.0 / 3.0, 2.0 / 3.0, 0.0]);
+        // nothing pays: hold
+        assert_close(&max_return(Some(vec![0.04; 3])), &PREV);
+    }
+
+    fn min_risk(min_return: Option<f64>, rates: Option<Vec<f64>>) -> Vec<f64> {
+        let universe = cost_universe();
+        let mut b = Strategy::builder("MinVar").minimize_risk(1.0);
+        if let Some(r) = min_return {
+            b = b.score_min("expected_return", r);
+        }
+        let strategy = b.build();
+        let mut model = PortfolioModel::new(&universe)
+            .strategy(&strategy)
+            .restrictions(Restrictions::builder().long_only().fully_invested().build())
+            .turnover(PREV.to_vec(), 2.0);
+        if let Some(r) = rates {
+            model = model.transaction_costs(r, "expected_return");
+        }
+        let sol = model.solve().unwrap();
+        assert_eq!(sol.status, SolveStatus::Optimal);
+        sol.weights_vec
+    }
+
+    #[test]
+    fn test_costs_do_not_move_the_minimum_risk_portfolio() {
+        assert_close(&min_risk(None, Some(vec![0.05; 3])), &min_risk(None, None));
+    }
+
+    #[test]
+    fn test_costs_make_a_return_target_net() {
+        let rates = vec![0.02; 3];
+        let net_return = |w: &[f64]| -> f64 {
+            let mu = [0.10, 0.05, 0.03];
+            (0..3).map(|i| mu[i] * w[i] - rates[i] * (w[i] - PREV[i]).abs()).sum()
+        };
+        let gross = min_risk(Some(0.07), None);
+        let net = min_risk(Some(0.07), Some(rates.clone()));
+        assert!(net_return(&gross) < 0.07 - 1e-4, "the gross answer misses the target net");
+        assert!(net_return(&net) >= 0.07 - 1e-6, "net return {}", net_return(&net));
+    }
+
+    #[test]
+    fn test_costs_without_turnover_fail_cleanly() {
+        let universe = cost_universe();
+        let strategy = Strategy::builder("Max").maximize("expected_return", 1.0).build();
+        let err = PortfolioModel::new(&universe)
+            .strategy(&strategy)
+            .transaction_costs(vec![0.01; 3], "expected_return")
+            .solve()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            PortfolioError::Compile(CompileError::TransactionCostsWithoutTurnover)
+        ));
     }
 }

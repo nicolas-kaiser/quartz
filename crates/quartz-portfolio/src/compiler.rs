@@ -3,13 +3,14 @@ use std::collections::HashSet;
 use clarabel::algebra::CscMatrix;
 use clarabel::solver::SupportedConeT;
 
-use quartz_core::{DimensionType, Universe};
+use quartz_core::{DimensionType, Sense, Universe};
 use quartz_solver::CompiledProblem;
 
 use crate::constraints::allocation::FullyInvested;
 use crate::constraints::bounds::WeightBounds;
 use crate::constraints::factor::FactorLink;
 use crate::constraints::turnover::TurnoverConstraint;
+use crate::constraints::TransactionCosts;
 use crate::constraints::ConstraintContribution;
 use crate::restriction::Restrictions;
 use crate::strategy::Strategy;
@@ -26,8 +27,12 @@ pub enum CompileError {
     NoCovarianceForQuadratic,
     /// Turnover constraint dimension mismatch.
     TurnoverDimensionMismatch { expected: usize, got: usize },
+    /// Transaction costs need a turnover constraint (they price its t variables).
+    TransactionCostsWithoutTurnover,
     /// Transaction cost rates length mismatch.
     TransactionCostDimensionMismatch { expected: usize, got: usize },
+    /// A transaction cost rate is negative or not finite.
+    InvalidTransactionCost { index: usize, value: f64 },
     /// A CVaR constraint requires scenarios on the universe.
     CvarRequiresScenarios,
     /// CVaR alpha must be in (0, 1) with a finite limit.
@@ -52,6 +57,15 @@ impl std::fmt::Display for CompileError {
                 write!(
                     f,
                     "Turnover previous_weights length ({got}) != n_assets ({expected})"
+                )
+            }
+            CompileError::TransactionCostsWithoutTurnover => {
+                write!(f, "Transaction costs require a turnover constraint")
+            }
+            CompileError::InvalidTransactionCost { index, value } => {
+                write!(
+                    f,
+                    "Transaction cost rate {index} must be finite and >= 0 (got {value})"
                 )
             }
             CompileError::TransactionCostDimensionMismatch { expected, got } => {
@@ -104,6 +118,19 @@ pub fn compile(
     tactic: Option<&Tactic>,
     restrictions: &Restrictions,
     turnover: Option<&TurnoverConstraint>,
+) -> Result<CompiledProblem, CompileError> {
+    compile_with_costs(universe, strategy, tactic, restrictions, turnover, None)
+}
+
+/// [`compile`] with transaction costs: the score `costs.score_key` becomes net
+/// of costs wherever more of it is wanted (see [`TransactionCosts`]).
+pub fn compile_with_costs(
+    universe: &Universe,
+    strategy: &Strategy,
+    tactic: Option<&Tactic>,
+    restrictions: &Restrictions,
+    turnover: Option<&TurnoverConstraint>,
+    costs: Option<&TransactionCosts>,
 ) -> Result<CompiledProblem, CompileError> {
     let n = universe.n_assets();
 
@@ -166,13 +193,24 @@ pub fn compile(
                 got: tc.previous_weights.len(),
             });
         }
-        if let Some(costs) = &tc.transaction_cost_rates {
-            if costs.len() != n {
-                return Err(CompileError::TransactionCostDimensionMismatch {
-                    expected: n,
-                    got: costs.len(),
-                });
-            }
+    }
+    if let Some(tc) = costs {
+        if turnover.is_none() {
+            return Err(CompileError::TransactionCostsWithoutTurnover);
+        }
+        if tc.rates.len() != n {
+            return Err(CompileError::TransactionCostDimensionMismatch {
+                expected: n,
+                got: tc.rates.len(),
+            });
+        }
+        if let Some((index, &value)) = tc
+            .rates
+            .iter()
+            .enumerate()
+            .find(|(_, c)| !c.is_finite() || **c < 0.0)
+        {
+            return Err(CompileError::InvalidTransactionCost { index, value });
         }
     }
 
@@ -187,7 +225,7 @@ pub fn compile(
         .collect();
 
     // Step 3: Build objective (P, q)
-    let (p, q) = build_objective(universe, &merged, n_vars, y_offset, turnover)?;
+    let (p, q) = build_objective(universe, &merged, n_vars, y_offset, costs)?;
 
     // Step 4: Collect all constraints
     let mut eq_contributions: Vec<ConstraintContribution> = Vec::new();
@@ -205,7 +243,11 @@ pub fn compile(
 
     // 4c: Score constraints (inequalities)
     for sc in &merged.score_constraints {
-        ineq_contributions.push(sc.compile(universe));
+        let mut contrib = sc.compile(universe);
+        if let Some(tc) = costs {
+            tc.net_score_rows(sc, &mut contrib, n);
+        }
+        ineq_contributions.push(contrib);
     }
 
     // 4d: Weight bounds (long-only and/or max single weight)
@@ -338,15 +380,15 @@ pub fn compile(
 
 /// Build the objective P (quadratic) and q (linear) from merged dimensions.
 ///
-/// When `turnover` carries `transaction_cost_rates`, the per-asset costs are
-/// added to `q[n..2n]` (the t auxiliary variables) so the solver penalises
-/// trading as part of the optimisation. See `quartz/docs/transaction-costs.md`.
+/// With `costs`, a linear dimension that maximises `costs.score_key` maximises
+/// it net of costs: `q[n + i] −= factor·cᵢ` on the turnover variables t
+/// (columns n..2n), in the dimension's own (normalised) weight.
 fn build_objective(
     universe: &Universe,
     merged: &MergedStrategy,
     n_vars: usize,
     y_offset: usize,
-    turnover: Option<&TurnoverConstraint>,
+    costs: Option<&TransactionCosts>,
 ) -> Result<(CscMatrix<f64>, Vec<f64>), CompileError> {
     let n = universe.n_assets();
     let mut q = vec![0.0; n_vars];
@@ -373,16 +415,13 @@ fn build_objective(
                 for (i, &s) in scores.iter().enumerate() {
                     q[i] += factor * s;
                 }
-            }
-        }
-    }
-
-    // Transaction cost rates: q[n + i] += cᵢ for the t_i auxiliary variables.
-    // The t variables are only present when turnover is active (columns n..2n).
-    if let Some(tc) = turnover {
-        if let Some(costs) = &tc.transaction_cost_rates {
-            for (i, &c) in costs.iter().enumerate() {
-                q[n + i] += c;
+                if let Some(tc) = costs {
+                    if *score_key == tc.score_key && matches!(dim.sense, Sense::Maximize) {
+                        for (i, &c) in tc.rates.iter().enumerate() {
+                            q[n + i] -= factor * c;
+                        }
+                    }
+                }
             }
         }
     }
@@ -817,5 +856,146 @@ mod tests {
 
         let result = compile(&universe, &strategy, None, &restrictions, None);
         assert!(result.is_err());
+    }
+
+    // ---- transaction costs -------------------------------------------------
+
+    fn costs() -> TransactionCosts {
+        TransactionCosts::new(vec![0.01, 0.02, 0.03], "expected_return")
+    }
+
+    /// (row, value) entries of column `col` of A.
+    fn a_col(p: &CompiledProblem, col: usize) -> Vec<(usize, f64)> {
+        (p.a.colptr[col]..p.a.colptr[col + 1])
+            .map(|k| (p.a.rowval[k], p.a.nzval[k]))
+            .collect()
+    }
+
+    #[test]
+    fn test_costs_net_a_maximised_score_in_its_weight() {
+        let universe = test_universe();
+        let strategy = Strategy::builder("Balanced")
+            .minimize_risk(0.5)
+            .maximize("expected_return", 0.5)
+            .build();
+        let restrictions = Restrictions::builder().long_only().fully_invested().build();
+        let turnover = TurnoverConstraint::new(vec![0.4, 0.3, 0.3], 2.0);
+
+        let gross = compile(&universe, &strategy, None, &restrictions, Some(&turnover)).unwrap();
+        let net = compile_with_costs(
+            &universe, &strategy, None, &restrictions, Some(&turnover), Some(&costs()),
+        )
+        .unwrap();
+
+        assert_eq!(net.q[..3], gross.q[..3]);
+        assert_eq!(gross.q[3..], [0.0; 3]);
+        // −0.5·(μᵀw − cᵀt): the cost carries the return dimension's weight
+        for (i, c) in [0.01, 0.02, 0.03].iter().enumerate() {
+            assert!((net.q[3 + i] - 0.5 * c).abs() < 1e-15, "q[t{i}] = {}", net.q[3 + i]);
+        }
+        assert_eq!(net.b, gross.b);
+    }
+
+    #[test]
+    fn test_costs_leave_risk_and_minimised_scores_gross() {
+        let universe = test_universe();
+        let strategy = Strategy::builder("LowEsg")
+            .minimize_risk(0.5)
+            .minimize("expected_return", 0.5)
+            .build();
+        let restrictions = Restrictions::builder().long_only().fully_invested().build();
+        let turnover = TurnoverConstraint::new(vec![0.4, 0.3, 0.3], 2.0);
+
+        let net = compile_with_costs(
+            &universe, &strategy, None, &restrictions, Some(&turnover), Some(&costs()),
+        )
+        .unwrap();
+        assert_eq!(net.q[3..], [0.0; 3]);
+    }
+
+    #[test]
+    fn test_costs_net_a_score_minimum_only() {
+        let universe = test_universe();
+        let strategy = Strategy::builder("MinVarAtReturn")
+            .minimize_risk(1.0)
+            .score_min("expected_return", 0.06)
+            .score_max("expected_return", 0.09)
+            .score_min("esg", 4.0)
+            .build();
+        let restrictions = Restrictions::builder().long_only().fully_invested().build();
+        let turnover = TurnoverConstraint::new(vec![0.4, 0.3, 0.3], 2.0);
+
+        let gross = compile(&universe, &strategy, None, &restrictions, Some(&turnover)).unwrap();
+        let net = compile_with_costs(
+            &universe, &strategy, None, &restrictions, Some(&turnover), Some(&costs()),
+        )
+        .unwrap();
+
+        assert_eq!(net.b, gross.b);
+        let mut extra_rows = Vec::new();
+        for (i, c) in [0.01, 0.02, 0.03].iter().enumerate() {
+            let (g, n) = (a_col(&gross, 3 + i), a_col(&net, 3 + i));
+            let extra: Vec<_> = n.iter().filter(|e| !g.contains(e)).collect();
+            assert_eq!(extra.len(), 1, "one new entry in column t{i}");
+            assert_eq!(extra[0].1, *c);
+            extra_rows.push(extra[0].0);
+        }
+        // the same row for every t: the return minimum (−μᵀw ≤ −0.06), not its max or esg
+        assert!(extra_rows.iter().all(|&r| r == extra_rows[0]));
+        assert_eq!(net.b[extra_rows[0]], -0.06);
+    }
+
+    #[test]
+    fn test_costs_keep_the_aux_layout() {
+        let universe = factor_universe();
+        let strategy = Strategy::builder("Balanced")
+            .minimize_risk(0.5)
+            .maximize("expected_return", 0.5)
+            .build();
+        let restrictions = Restrictions::builder().long_only().fully_invested().build();
+        let turnover = TurnoverConstraint::new(vec![0.4, 0.3, 0.3], 2.0);
+
+        let gross = compile(&universe, &strategy, None, &restrictions, Some(&turnover)).unwrap();
+        let net = compile_with_costs(
+            &universe, &strategy, None, &restrictions, Some(&turnover), Some(&costs()),
+        )
+        .unwrap();
+
+        // [w (3), t (3), y (2)]: costs only on t, the factor block untouched
+        assert_eq!(net.n_aux, gross.n_aux);
+        assert_eq!(net.n_aux, 3 + 2);
+        assert!(net.q[3..6].iter().all(|&q| q > 0.0));
+        assert_eq!(net.q[6..], gross.q[6..]);
+        assert_eq!(net.b, gross.b);
+    }
+
+    #[test]
+    fn test_costs_errors() {
+        let universe = test_universe();
+        let strategy = Strategy::builder("Max").maximize("expected_return", 1.0).build();
+        let restrictions = Restrictions::builder().long_only().fully_invested().build();
+        let turnover = TurnoverConstraint::new(vec![0.4, 0.3, 0.3], 2.0);
+        let with = |tc: Option<&TurnoverConstraint>, rates: Vec<f64>| {
+            let costs = TransactionCosts::new(rates, "expected_return");
+            compile_with_costs(&universe, &strategy, None, &restrictions, tc, Some(&costs))
+        };
+
+        assert!(matches!(
+            with(None, vec![0.01; 3]),
+            Err(CompileError::TransactionCostsWithoutTurnover)
+        ));
+        assert!(matches!(
+            with(Some(&turnover), vec![0.01; 2]),
+            Err(CompileError::TransactionCostDimensionMismatch { expected: 3, got: 2 })
+        ));
+        for (bad, at) in [(f64::NAN, 1), (f64::INFINITY, 2), (-0.01, 0)] {
+            let mut rates = vec![0.01; 3];
+            rates[at] = bad;
+            match with(Some(&turnover), rates) {
+                Err(CompileError::InvalidTransactionCost { index, .. }) => assert_eq!(index, at),
+                other => panic!("{bad}: expected InvalidTransactionCost, got {other:?}"),
+            }
+        }
+        assert!(with(Some(&turnover), vec![0.0; 3]).is_ok());
     }
 }
