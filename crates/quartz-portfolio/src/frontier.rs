@@ -110,14 +110,15 @@ pub struct FrontierResult {
 
 /// Explores the Pareto frontier of a multi-dimensional strategy.
 ///
-/// Mirrors [`PortfolioModel`]'s builder API; tactic, restrictions, and turnover
-/// apply identically to every explored point.
+/// Mirrors [`PortfolioModel`]'s builder API; tactic, restrictions, turnover, and
+/// transaction cost rates apply identically to every explored point.
 pub struct FrontierExplorer<'a> {
     universe: &'a Universe,
     strategy: &'a Strategy,
     tactic: Option<&'a Tactic>,
     restrictions: Restrictions,
     turnover: Option<(Vec<f64>, f64)>,
+    transaction_cost_rates: Option<Vec<f64>>,
 }
 
 impl<'a> FrontierExplorer<'a> {
@@ -128,6 +129,7 @@ impl<'a> FrontierExplorer<'a> {
             tactic: None,
             restrictions: Restrictions::default(),
             turnover: None,
+            transaction_cost_rates: None,
         }
     }
 
@@ -143,6 +145,13 @@ impl<'a> FrontierExplorer<'a> {
 
     pub fn turnover(mut self, previous_weights: Vec<f64>, max_turnover: f64) -> Self {
         self.turnover = Some((previous_weights, max_turnover));
+        self
+    }
+
+    /// Attach per-asset transaction cost rates (applied to every explored point).
+    /// Must be called after `.turnover()`; silently ignored when turnover is not set.
+    pub fn transaction_cost_rates(mut self, rates: Vec<f64>) -> Self {
+        self.transaction_cost_rates = Some(rates);
         self
     }
 
@@ -279,6 +288,9 @@ impl<'a> FrontierExplorer<'a> {
             .restrictions(self.restrictions.clone());
         if let Some((prev, max)) = &self.turnover {
             model = model.turnover(prev.clone(), *max);
+            if let Some(costs) = &self.transaction_cost_rates {
+                model = model.transaction_cost_rates(costs.clone());
+            }
         }
         let sol = model.solve()?;
         if sol.status != SolveStatus::Optimal {

@@ -93,7 +93,7 @@ fn settings(max_iter: u32, verbose: bool) -> SolverSettings {
 /// Solve a single portfolio optimization problem.
 #[pyfunction]
 #[pyo3(signature = (universe, strategy, *, tactic=None, restrictions=None, turnover=None,
-                    max_iter=200, verbose=false))]
+                    transaction_cost_rates=None, max_iter=200, verbose=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve(
     py: Python<'_>,
@@ -102,6 +102,7 @@ pub fn solve(
     tactic: Option<&Tactic>,
     restrictions: Option<&Restrictions>,
     turnover: Option<(Vec<f64>, f64)>,
+    transaction_cost_rates: Option<Vec<f64>>,
     max_iter: u32,
     verbose: bool,
 ) -> PyResult<Solution> {
@@ -122,6 +123,9 @@ pub fn solve(
         }
         if let Some((prev, max)) = turnover {
             model = model.turnover(prev, max);
+            if let Some(costs) = transaction_cost_rates {
+                model = model.transaction_cost_rates(costs);
+            }
         }
         model.solve()
     });
@@ -141,6 +145,7 @@ struct OwnedItem {
     tactic: Option<quartz_portfolio::Tactic>,
     restrictions: RRestrictions,
     turnover: Option<(Vec<f64>, f64)>,
+    transaction_cost_rates: Option<Vec<f64>>,
 }
 
 /// Solve many independent problems in parallel (rayon; the GIL is released).
@@ -175,6 +180,7 @@ pub fn solve_batch(
                     .clone()
                     .unwrap_or_else(|| default_r.clone()),
                 turnover: p.turnover.clone(),
+                transaction_cost_rates: p.transaction_cost_rates.clone(),
             },
             BatchInput::Pair(u, s) => OwnedItem {
                 universe: u.inner.clone(),
@@ -182,6 +188,7 @@ pub fn solve_batch(
                 tactic: default_t.clone(),
                 restrictions: default_r.clone(),
                 turnover: None,
+                transaction_cost_rates: None,
             },
         })
         .collect();
@@ -198,6 +205,9 @@ pub fn solve_batch(
                 }
                 if let Some((prev, max)) = &item.turnover {
                     p = p.turnover(prev.clone(), *max);
+                    if let Some(costs) = &item.transaction_cost_rates {
+                        p = p.transaction_cost_rates(costs.clone());
+                    }
                 }
                 p
             })
@@ -311,7 +321,8 @@ fn frontier_from_rust(
 /// Dimension names are the score key, or "financial_risk" for the risk dim.
 #[pyfunction]
 #[pyo3(signature = (universe, strategy, dim_a, dim_b, n_points=25, *,
-                    tactic=None, restrictions=None, turnover=None))]
+                    tactic=None, restrictions=None, turnover=None,
+                    transaction_cost_rates=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn sweep(
     py: Python<'_>,
@@ -323,6 +334,7 @@ pub fn sweep(
     tactic: Option<&Tactic>,
     restrictions: Option<&Restrictions>,
     turnover: Option<(Vec<f64>, f64)>,
+    transaction_cost_rates: Option<Vec<f64>>,
 ) -> PyResult<Frontier> {
     let u = universe.inner.clone();
     let s = strategy.to_strategy();
@@ -337,6 +349,9 @@ pub fn sweep(
         }
         if let Some((prev, max)) = turnover {
             explorer = explorer.turnover(prev, max);
+            if let Some(costs) = transaction_cost_rates {
+                explorer = explorer.transaction_cost_rates(costs);
+            }
         }
         explorer.sweep(&dim_a, &dim_b, n_points)
     });
@@ -346,7 +361,8 @@ pub fn sweep(
 /// Enumerate a full simplex lattice over every strategy dimension.
 #[pyfunction]
 #[pyo3(signature = (universe, strategy, resolution=5, *,
-                    tactic=None, restrictions=None, turnover=None))]
+                    tactic=None, restrictions=None, turnover=None,
+                    transaction_cost_rates=None))]
 pub fn simplex_grid(
     py: Python<'_>,
     universe: &Universe,
@@ -355,6 +371,7 @@ pub fn simplex_grid(
     tactic: Option<&Tactic>,
     restrictions: Option<&Restrictions>,
     turnover: Option<(Vec<f64>, f64)>,
+    transaction_cost_rates: Option<Vec<f64>>,
 ) -> PyResult<Frontier> {
     let u = universe.inner.clone();
     let s = strategy.to_strategy();
@@ -368,6 +385,9 @@ pub fn simplex_grid(
         }
         if let Some((prev, max)) = turnover {
             explorer = explorer.turnover(prev, max);
+            if let Some(costs) = transaction_cost_rates {
+                explorer = explorer.transaction_cost_rates(costs);
+            }
         }
         explorer.simplex_grid(resolution)
     });

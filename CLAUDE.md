@@ -85,3 +85,4 @@ Risk constraints on `Strategy` (both `#[serde(default)]`, passed through `tactic
 - `serde::Serialize`/`Deserialize` on all public data types.
 - Tests live in `#[cfg(test)] mod tests` at the bottom of each file; examples in `crates/quartz-portfolio/examples/`.
 - **Adding a new constraint type**: create a file in `quartz-portfolio/src/constraints/`, implement `compile() -> ConstraintContribution`, re-export from `constraints/mod.rs`, and wire it into `compiler.rs`.
+- **Documenting changes**: every non-trivial change to quartz (new feature, API addition, constraint, design decision) must ship a Markdown file under `quartz/docs/`. Name it `<topic>.md` (e.g. `transaction-costs.md`). Update existing docs when the behaviour they describe changes.

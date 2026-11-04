@@ -308,6 +308,28 @@ dimensions:
         quartz.Strategy.from_file(tmp_path / "missing.toml")
 
 
+def test_transaction_cost_rates():
+    # An asset with a high fee cost should trade less than without costs.
+    # 3 assets, equal covariance; A has higher return but asset A gets a 30% cost.
+    # Without costs: max-return picks mostly A.  With costs: A trades less.
+    u = diag_universe()  # A=0.10, B=0.05, C=0.03; prev weights all zero implied
+    prev = [1 / 3, 1 / 3, 1 / 3]
+    s = quartz.Strategy("MaxRet").maximize("expected_return", 1.0).minimize_risk(1e-6)
+
+    sol_free = quartz.solve(u, s, restrictions=base_restrictions(), turnover=(prev, 1.0))
+    assert sol_free.status == quartz.SolveStatus.Optimal
+
+    # High fee on A: c_A = 0.30, others 0
+    sol_costly = quartz.solve(u, s, restrictions=base_restrictions(),
+                              turnover=(prev, 1.0),
+                              transaction_cost_rates=[0.30, 0.0, 0.0])
+    assert sol_costly.status == quartz.SolveStatus.Optimal
+    # Costs discourage trading A away from its current weight
+    delta_free = abs(sol_free.weights_vec[0] - prev[0])
+    delta_costly = abs(sol_costly.weights_vec[0] - prev[0])
+    assert delta_costly < delta_free
+
+
 def test_tactic():
     assets = [
         quartz.Asset("A", tags={"currency": "USD"}, scores={"expected_return": 0.10}),

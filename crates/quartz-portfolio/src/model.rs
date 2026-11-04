@@ -94,6 +94,18 @@ impl<'a> PortfolioModel<'a> {
         self
     }
 
+    /// Attach per-asset transaction cost rates to the turnover constraint.
+    ///
+    /// Must be called **after** `.turnover()`. Calling before is a no-op because
+    /// there is no `TurnoverConstraint` to attach the rates to yet.
+    /// Length is validated at compile time (see `CompileError::TransactionCostDimensionMismatch`).
+    pub fn transaction_cost_rates(mut self, rates: Vec<f64>) -> Self {
+        if let Some(tc) = self.turnover.as_mut() {
+            tc.transaction_cost_rates = Some(rates);
+        }
+        self
+    }
+
     pub fn verbose(mut self, verbose: bool) -> Self {
         self.solver_settings.verbose = verbose;
         self

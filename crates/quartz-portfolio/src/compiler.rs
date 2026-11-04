@@ -26,6 +26,8 @@ pub enum CompileError {
     NoCovarianceForQuadratic,
     /// Turnover constraint dimension mismatch.
     TurnoverDimensionMismatch { expected: usize, got: usize },
+    /// Transaction cost rates length mismatch.
+    TransactionCostDimensionMismatch { expected: usize, got: usize },
     /// A CVaR constraint requires scenarios on the universe.
     CvarRequiresScenarios,
     /// CVaR alpha must be in (0, 1) with a finite limit.
@@ -50,6 +52,12 @@ impl std::fmt::Display for CompileError {
                 write!(
                     f,
                     "Turnover previous_weights length ({got}) != n_assets ({expected})"
+                )
+            }
+            CompileError::TransactionCostDimensionMismatch { expected, got } => {
+                write!(
+                    f,
+                    "Transaction cost rates length ({got}) != n_assets ({expected})"
                 )
             }
             CompileError::CvarRequiresScenarios => {
@@ -158,6 +166,14 @@ pub fn compile(
                 got: tc.previous_weights.len(),
             });
         }
+        if let Some(costs) = &tc.transaction_cost_rates {
+            if costs.len() != n {
+                return Err(CompileError::TransactionCostDimensionMismatch {
+                    expected: n,
+                    got: costs.len(),
+                });
+            }
+        }
     }
 
     // Step 1: Merge strategy + tactic
@@ -171,7 +187,7 @@ pub fn compile(
         .collect();
 
     // Step 3: Build objective (P, q)
-    let (p, q) = build_objective(universe, &merged, n_vars, y_offset)?;
+    let (p, q) = build_objective(universe, &merged, n_vars, y_offset, turnover)?;
 
     // Step 4: Collect all constraints
     let mut eq_contributions: Vec<ConstraintContribution> = Vec::new();
@@ -321,12 +337,18 @@ pub fn compile(
 }
 
 /// Build the objective P (quadratic) and q (linear) from merged dimensions.
+///
+/// When `turnover` carries `transaction_cost_rates`, the per-asset costs are
+/// added to `q[n..2n]` (the t auxiliary variables) so the solver penalises
+/// trading as part of the optimisation. See `quartz/docs/transaction-costs.md`.
 fn build_objective(
     universe: &Universe,
     merged: &MergedStrategy,
     n_vars: usize,
     y_offset: usize,
+    turnover: Option<&TurnoverConstraint>,
 ) -> Result<(CscMatrix<f64>, Vec<f64>), CompileError> {
+    let n = universe.n_assets();
     let mut q = vec![0.0; n_vars];
 
     // Collect P contributions
@@ -351,6 +373,16 @@ fn build_objective(
                 for (i, &s) in scores.iter().enumerate() {
                     q[i] += factor * s;
                 }
+            }
+        }
+    }
+
+    // Transaction cost rates: q[n + i] += cᵢ for the t_i auxiliary variables.
+    // The t variables are only present when turnover is active (columns n..2n).
+    if let Some(tc) = turnover {
+        if let Some(costs) = &tc.transaction_cost_rates {
+            for (i, &c) in costs.iter().enumerate() {
+                q[n + i] += c;
             }
         }
     }

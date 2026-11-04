@@ -34,6 +34,9 @@ pub struct BatchProblem<'a> {
     pub restrictions: Restrictions,
     /// Per-item turnover: (previous weights, max turnover).
     pub turnover: Option<(Vec<f64>, f64)>,
+    /// Per-asset transaction cost rates, attached to the turnover constraint.
+    /// Ignored when `turnover` is `None`.
+    pub transaction_cost_rates: Option<Vec<f64>>,
 }
 
 impl<'a> BatchProblem<'a> {
@@ -44,6 +47,7 @@ impl<'a> BatchProblem<'a> {
             tactic: None,
             restrictions: Restrictions::default(),
             turnover: None,
+            transaction_cost_rates: None,
         }
     }
 
@@ -59,6 +63,13 @@ impl<'a> BatchProblem<'a> {
 
     pub fn turnover(mut self, previous_weights: Vec<f64>, max_turnover: f64) -> Self {
         self.turnover = Some((previous_weights, max_turnover));
+        self
+    }
+
+    /// Attach per-asset transaction cost rates. Must be called after `.turnover()`;
+    /// silently ignored when `turnover` is not set.
+    pub fn transaction_cost_rates(mut self, rates: Vec<f64>) -> Self {
+        self.transaction_cost_rates = Some(rates);
         self
     }
 }
@@ -79,6 +90,9 @@ pub fn solve_batch(
         }
         if let Some((prev, max)) = &p.turnover {
             model = model.turnover(prev.clone(), *max);
+            if let Some(costs) = &p.transaction_cost_rates {
+                model = model.transaction_cost_rates(costs.clone());
+            }
         }
         model.solve()
     })

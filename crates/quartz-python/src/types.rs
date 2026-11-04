@@ -344,7 +344,7 @@ impl Restrictions {
 }
 
 /// One item of a `solve_batch` call: a universe/strategy pair with optional
-/// per-item tactic, restrictions, and turnover.
+/// per-item tactic, restrictions, turnover, and transaction cost rates.
 #[pyclass(module = "quartz")]
 pub struct Problem {
     pub(crate) universe: quartz_core::Universe,
@@ -352,18 +352,21 @@ pub struct Problem {
     pub(crate) tactic: Option<quartz_portfolio::Tactic>,
     pub(crate) restrictions: Option<quartz_portfolio::Restrictions>,
     pub(crate) turnover: Option<(Vec<f64>, f64)>,
+    pub(crate) transaction_cost_rates: Option<Vec<f64>>,
 }
 
 #[pymethods]
 impl Problem {
     #[new]
-    #[pyo3(signature = (universe, strategy, *, tactic=None, restrictions=None, turnover=None))]
+    #[pyo3(signature = (universe, strategy, *, tactic=None, restrictions=None, turnover=None,
+                        transaction_cost_rates=None))]
     fn new(
         universe: &Universe,
         strategy: &Strategy,
         tactic: Option<&Tactic>,
         restrictions: Option<&Restrictions>,
         turnover: Option<(Vec<f64>, f64)>,
+        transaction_cost_rates: Option<Vec<f64>>,
     ) -> Self {
         Self {
             universe: universe.inner.clone(),
@@ -371,6 +374,7 @@ impl Problem {
             tactic: tactic.map(|t| t.to_tactic()),
             restrictions: restrictions.map(|r| r.inner.clone()),
             turnover,
+            transaction_cost_rates,
         }
     }
 }
