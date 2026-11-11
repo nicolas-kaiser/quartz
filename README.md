@@ -274,6 +274,8 @@ See [`demo/README.md`](demo/README.md) for details.
 └──────────────────────────────────────────────────────┘
 ```
 
+What `P`, `q`, `A`, `b` and the cone list contain, row by row, and what the solver returns: [docs/compiler.md](docs/compiler.md).
+
 ### Crate structure
 
 | Crate | Purpose |

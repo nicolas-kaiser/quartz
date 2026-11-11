@@ -21,7 +21,7 @@ return and a one-off fee `fᵢ` (fraction of the amount traded) spread over a ho
 
 ### Where the score becomes net
 
-Clarabel solves `min ½xᵀPx + qᵀx` with `P = (Σ_quad sign·weight)·Σ` and `q_w = Σ_linear
+Clarabel solves `min ½xᵀPx + qᵀx` with `P = 2·(Σ_quad sign·weight)·Σ` (so that `½xᵀPx` is `weight·wᵀΣw`) and `q_w = Σ_linear
 sign·weight·s`; the builder and the file loaders normalise dimension weights to sum to 1.
 The cost enters exactly where the strategy wants **more** of `score_key`:
 

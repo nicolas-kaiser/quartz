@@ -427,10 +427,12 @@ fn build_objective(
     }
 
     if has_quadratic {
-        // P += λ * Σ (only upper triangle for Clarabel)
+        // P = 2λ·Σ (only upper triangle for Clarabel): the solver minimises
+        // ½xᵀPx, so the factor 2 makes the risk term exactly λ·wᵀΣw — on the
+        // same scale as the linear terms λ·sᵀw.
         add_covariance_to_p(
             universe,
-            lambda_quad,
+            2.0 * lambda_quad,
             y_offset,
             &mut p_triplet_rows,
             &mut p_triplet_cols,
@@ -449,15 +451,16 @@ fn build_objective(
     Ok((p, q))
 }
 
-/// Extract the covariance and add λ*Σ to the P matrix triplets (upper triangle only).
+/// Extract the covariance and add `scale`·Σ to the P matrix triplets (upper
+/// triangle only). The caller passes `scale` = 2λ (see `build_objective`).
 ///
 /// For the factor model Σ = BFBᵀ + D, the quadratic form is expressed through
 /// auxiliary variables y = Bᵀw (linked by equality rows added in `compile`):
-/// wᵀΣw = yᵀFy + wᵀDw, so P gets λ·diag(D) on the w block and λ·F on the
-/// y block at `y_offset` — n + k(k+1)/2 nonzeros instead of n².
+/// wᵀΣw = yᵀFy + wᵀDw, so P gets scale·diag(D) on the w block and scale·F on
+/// the y block at `y_offset` — n + k(k+1)/2 nonzeros instead of n².
 fn add_covariance_to_p(
     universe: &Universe,
-    lambda: f64,
+    scale: f64,
     y_offset: usize,
     rows: &mut Vec<usize>,
     cols: &mut Vec<usize>,
@@ -476,7 +479,7 @@ fn add_covariance_to_p(
                         // Upper triangle only
                         rows.push(i);
                         cols.push(j);
-                        vals.push(lambda * v);
+                        vals.push(scale * v);
                     }
                 }
             }
@@ -486,22 +489,22 @@ fn add_covariance_to_p(
             specific_variance,
             ..
         } => {
-            // P += λ·D on the w block (diagonal)
+            // P += scale·D on the w block (diagonal)
             for (i, &d) in specific_variance.iter().enumerate() {
                 if d != 0.0 {
                     rows.push(i);
                     cols.push(i);
-                    vals.push(lambda * d);
+                    vals.push(scale * d);
                 }
             }
-            // P += λ·F on the y block (upper triangle; F stored full-symmetric)
+            // P += scale·F on the y block (upper triangle; F stored full-symmetric)
             for j in 0..factor_cov.n {
                 for idx in factor_cov.colptr[j]..factor_cov.colptr[j + 1] {
                     let i = factor_cov.rowval[idx];
                     if i <= j {
                         rows.push(y_offset + i);
                         cols.push(y_offset + j);
-                        vals.push(lambda * factor_cov.nzval[idx]);
+                        vals.push(scale * factor_cov.nzval[idx]);
                     }
                 }
             }
@@ -558,6 +561,24 @@ mod tests {
         assert_eq!(problem.n_vars(), 3);
         // 1 equality (fully invested) + 3 inequalities (long only)
         assert_eq!(problem.b.len(), 4);
+    }
+
+    #[test]
+    fn test_risk_term_is_weight_times_variance() {
+        // The solver minimises ½xᵀPx, so P must be 2·weight·Σ for the risk
+        // term to be weight·wᵀΣw (same scale as the linear terms).
+        let universe = test_universe();
+        let strategy = Strategy::builder("Balanced")
+            .minimize_risk(0.5)
+            .maximize("expected_return", 0.5)
+            .build();
+        let restrictions = Restrictions::builder().long_only().fully_invested().build();
+
+        let problem = compile(&universe, &strategy, None, &restrictions, None).unwrap();
+
+        // Upper triangle of 2·0.5·Σ = Σ, column by column
+        assert_eq!(problem.p.nzval, vec![0.04, 0.006, 0.09, 0.002, 0.009, 0.01]);
+        assert_eq!(problem.q, vec![-0.05, -0.025, -0.015]);
     }
 
     #[test]

@@ -380,7 +380,9 @@ mod tests {
         // Reported variance must also agree across the two covariance models
         let vf = sol_factor.variance().unwrap();
         let vd = sol_dense.variance().unwrap();
-        assert!((vf - vd).abs() < 1e-8, "variance differs: {vf} vs {vd}");
+        // (two different formulations, each solved to ~1e-8: the weights agree
+        // to solver tolerance, the variance to about one order less)
+        assert!((vf - vd).abs() < 1e-7, "variance differs: {vf} vs {vd}");
     }
 
     #[test]
