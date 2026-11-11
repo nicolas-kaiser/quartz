@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use clarabel::algebra::CscMatrix;
 use clarabel::solver::SupportedConeT;
@@ -23,6 +23,14 @@ pub enum CompileError {
     MergeError(tactic::MergeError),
     /// No dimensions specified in strategy.
     NoDimensions,
+    /// A group constraint matches no asset and its bounds exclude 0, so it
+    /// can never be satisfied.
+    EmptyGroup {
+        tag_key: String,
+        tag_value: String,
+        lower: f64,
+        upper: f64,
+    },
     /// Quadratic dimension requested but no covariance available.
     NoCovarianceForQuadratic,
     /// Turnover constraint dimension mismatch.
@@ -50,6 +58,13 @@ impl std::fmt::Display for CompileError {
         match self {
             CompileError::MergeError(e) => write!(f, "Merge error: {e}"),
             CompileError::NoDimensions => write!(f, "Strategy has no optimization dimensions"),
+            CompileError::EmptyGroup { tag_key, tag_value, lower, upper } => {
+                write!(
+                    f,
+                    "Group ({tag_key}, {tag_value}) matches no asset, so its weight is 0, \
+                     outside the required [{lower}, {upper}]"
+                )
+            }
             CompileError::NoCovarianceForQuadratic => {
                 write!(f, "Quadratic dimension requires a covariance model")
             }
@@ -217,8 +232,9 @@ pub fn compile_with_costs(
     // Step 1: Merge strategy + tactic
     let merged = tactic::merge(strategy, tactic)?;
 
-    // Step 2: Compute excluded asset indices
-    let excluded: HashSet<usize> = restrictions
+    // Step 2: Compute excluded asset indices (sorted, so the exclusion rows —
+    // and their duals — are always in asset order)
+    let excluded: BTreeSet<usize> = restrictions
         .exclusions
         .iter()
         .flat_map(|e| e.excluded_indices(universe))
@@ -236,8 +252,20 @@ pub fn compile_with_costs(
         eq_contributions.push(FullyInvested.compile(n));
     }
 
-    // 4b: Group constraints (inequalities)
+    // 4b: Group constraints (inequalities). A group matching no asset has
+    // weight 0: it adds no rows when its bounds allow 0, and is an error
+    // otherwise (it could never be satisfied).
     for gc in &merged.group_constraints {
+        if universe.asset_indices(&gc.tag_key, &gc.tag_value).is_empty()
+            && (gc.lower > 0.0 || gc.upper < 0.0)
+        {
+            return Err(CompileError::EmptyGroup {
+                tag_key: gc.tag_key.clone(),
+                tag_value: gc.tag_value.clone(),
+                lower: gc.lower,
+                upper: gc.upper,
+            });
+        }
         ineq_contributions.push(gc.compile(universe));
     }
 
@@ -596,6 +624,49 @@ mod tests {
 
         // 1 eq (fully_invested) + 2*2 ineq (groups) + 3 ineq (long_only)
         assert_eq!(problem.b.len(), 1 + 4 + 3);
+    }
+
+    #[test]
+    fn test_group_matching_no_asset() {
+        let universe = test_universe();
+        let restrictions = Restrictions::builder().long_only().fully_invested().build();
+
+        // Bounds exclude 0: can never hold, so it is a compile error
+        let s = Strategy::builder("X")
+            .minimize_risk(1.0)
+            .group("currency", "JPY", 0.10, 0.20)
+            .build();
+        assert!(matches!(
+            compile(&universe, &s, None, &restrictions, None),
+            Err(CompileError::EmptyGroup { lower, .. }) if lower == 0.10
+        ));
+
+        // Bounds allow 0: trivially satisfied, no rows
+        let s = Strategy::builder("X")
+            .minimize_risk(1.0)
+            .group("currency", "JPY", 0.0, 0.20)
+            .build();
+        let problem = compile(&universe, &s, None, &restrictions, None).unwrap();
+        assert_eq!(problem.b.len(), 1 + 3);
+    }
+
+    #[test]
+    fn test_exclusion_rows_in_asset_order() {
+        let universe = test_universe();
+        let strategy = Strategy::builder("MinVar").minimize_risk(1.0).build();
+        let restrictions = Restrictions::builder()
+            .exclude_asset("C")
+            .exclude_tag("currency", "EUR") // B and C; C must not be duplicated
+            .exclude_asset("A")
+            .build();
+
+        let problem = compile(&universe, &strategy, None, &restrictions, None).unwrap();
+
+        // rows: 0 fully invested (strategy default), then exclusions A, B, C
+        assert_eq!(problem.b.len(), 4);
+        for (asset, row) in [(0, 1), (1, 2), (2, 3)] {
+            assert!(a_col(&problem, asset).contains(&(row, 1.0)), "asset {asset}");
+        }
     }
 
     #[test]

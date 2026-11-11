@@ -155,9 +155,10 @@ Merged into the strategy first (`tactic::merge`), before anything is compiled:
 | Tactic field | Effect on the merged strategy |
 |---|---|
 | `group_overrides` | same `(tag_key, tag_value)`: bounds become `[max(lower), min(upper)]`; empty interval → `MergeError`. New groups are added |
-| `score_overrides` | **replaces** the strategy's constraint on the same `score_key`; new ones are added |
+| `score_overrides` | same `score_key`: all strategy and tactic bounds on that score are intersected into one constraint — the higher minimum and the lower maximum win (`Min`, `Max` or `Range`); empty interval → `MergeError`. New scores are added |
 | `dimension_weight_overrides` | sets the weight of the dimension with that `name`, then all weights are re-normalised to sum to 1 |
 
+A tactic can therefore only tighten group and score bounds, never loosen them.
 `tracking_error`, `cvar` and `fully_invested` pass through unchanged.
 
 ### 2.4 `Restrictions`
@@ -167,7 +168,7 @@ Merged into the strategy first (`tactic::merge`), before anything is compiled:
 | `fully_invested` | 1 equality row (one row only, even if the strategy also asks for it) |
 | `long_only` | `n` inequality rows `wᵢ ≥ 0` |
 | `max_single_weight: Some(u)` | `n` inequality rows `wᵢ ≤ u` |
-| `exclusions` | 1 equality row `wᵢ = 0` per excluded asset |
+| `exclusions` | 1 equality row `wᵢ = 0` per excluded asset, in asset order (an asset hit by several rules gets one row) |
 
 ### 2.5 `TurnoverConstraint` (optional)
 
@@ -287,7 +288,7 @@ second-order cone blocks**. Within a group the order is fixed:
 | # | Group | Contribution | Present when | Rows |
 |---|---|---|---|---|
 | 1 | equality | fully invested | strategy or restrictions ask for it | 1 |
-| 2 | equality | exclusions | at least one excluded asset | 1 per excluded asset |
+| 2 | equality | exclusions, in asset order | at least one excluded asset | 1 per excluded asset |
 | 3 | equality | factor link `y = Bᵀw` | `y` block exists | `k` |
 | 4 | inequality | group constraints, in merged order | per group with ≥ 1 matching asset | 2 each |
 | 5 | inequality | score constraints, in merged order | per constraint | 1 (`Min`, `Max`) or 2 (`Range`) |
@@ -587,7 +588,8 @@ Checked before any matrix is built:
 | `CompileError` | Cause |
 |---|---|
 | `NoDimensions` | `strategy.dimensions` is empty |
-| `MergeError` | a tactic group override leaves an empty interval |
+| `MergeError` | a tactic group or score override leaves an empty interval (`EmptyGroupInterval`, `EmptyScoreInterval`) |
+| `EmptyGroup` | a group constraint matches no asset and its bounds exclude 0 (`lower > 0` or `upper < 0`) |
 | `TurnoverDimensionMismatch` | `previous_weights.len() != n` |
 | `TransactionCostsWithoutTurnover` | costs given without a turnover constraint |
 | `TransactionCostDimensionMismatch` | `rates.len() != n` |
@@ -604,9 +606,10 @@ Checked before any matrix is built:
 
 Things the compiler accepts without complaint:
 
-- **Unknown names match nothing.** A group constraint whose tag matches no asset
-  produces **no rows** — even with `lower > 0`. An exclusion naming an unknown
-  asset or tag is ignored. A score key no asset has is a vector of zeros.
+- **Unknown names match nothing.** An exclusion naming an unknown asset or tag
+  is ignored. A score key no asset has is a vector of zeros. A group constraint
+  whose tag matches no asset adds no rows when its bounds allow a weight of 0
+  (e.g. `0–20%`); when they do not, it is the compile error `EmptyGroup`.
 - **Contradictory bounds compile.** `lower > upper` in a group or range, or a
   tracking-error limit that conflicts with an exclusion, gives a valid problem
   that the solver reports as `Infeasible`.
@@ -620,11 +623,6 @@ Things the compiler accepts without complaint:
   a tactic merge normalise dimension weights. They scale `P` and `q` directly, so
   un-normalised weights change the objective value (not the optimum, if all are
   scaled alike).
-- **A tactic can loosen a score constraint.** Group bounds only tighten, but a
-  score override replaces the strategy's constraint outright.
-- **Exclusion rows have no stable order.** Excluded indices pass through a
-  `HashSet`, so the order of those equality rows — and of their duals in `z` —
-  can differ from run to run. The solution is unaffected.
 - **`t` is not the trade.** See section 6.2; compute `|w − w_prev|` yourself.
 
 ---

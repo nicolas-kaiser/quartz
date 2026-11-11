@@ -68,7 +68,7 @@ Risk constraints on `Strategy` (both `#[serde(default)]`, passed through `tactic
 ### Three-layer constraint model
 
 - **Strategy** — long-term dimension weights and allocation bounds ("40% risk, 25% return, EUR 40–60%")
-- **Tactic** — short-term overlay merged into the strategy by **interval intersection** (`[max(l), min(u)]`); bounds only tighten, never loosen; empty intersection is a `MergeError` before solving
+- **Tactic** — short-term overlay merged into the strategy by **interval intersection** (`[max(l), min(u)]`) for group **and score** bounds; bounds only tighten, never loosen; empty intersection is a `MergeError` (`EmptyGroupInterval` / `EmptyScoreInterval`) before solving
 - **Restrictions** — hard compliance constraints (long-only, fully invested, max weight, exclusions)
 
 ### Key design decisions

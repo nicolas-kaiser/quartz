@@ -1,13 +1,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::constraints::{CvarConstraint, GroupConstraint, ScoreConstraint, TrackingErrorConstraint};
+use crate::constraints::{
+    CvarConstraint, GroupConstraint, ScoreBound, ScoreConstraint, TrackingErrorConstraint,
+};
 use crate::strategy::Strategy;
 
 /// A tactical overlay that adjusts a strategy's parameters for a shorter horizon.
 ///
-/// Tactics can override group constraint bounds and dimension weights.
-/// When merged with a strategy, bounds are intersected (tightened).
+/// Tactics can tighten group and score bounds and override dimension weights.
+/// When merged with a strategy, bounds are intersected: a tactic never
+/// loosens a strategy bound.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tactic {
     pub name: String,
@@ -53,7 +56,8 @@ impl TacticBuilder {
         self
     }
 
-    /// Override a score constraint.
+    /// Tighten a score constraint. During merge, the bound is intersected
+    /// with the strategy's bounds on the same score.
     pub fn override_score(mut self, constraint: ScoreConstraint) -> Self {
         self.score_overrides.push(constraint);
         self
@@ -76,28 +80,99 @@ impl TacticBuilder {
     }
 }
 
-/// Error when merging a tactic with a strategy results in empty intervals.
+/// Error when merging a tactic with a strategy leaves an empty interval.
+///
+/// Bounds are `(lower, upper)`; an open side of a score bound is ±∞.
 #[derive(Debug, Clone)]
-pub struct MergeError {
-    pub tag_key: String,
-    pub tag_value: String,
-    pub strategy_bounds: (f64, f64),
-    pub tactic_bounds: (f64, f64),
+pub enum MergeError {
+    /// A group override does not overlap the strategy's group bounds.
+    EmptyGroupInterval {
+        tag_key: String,
+        tag_value: String,
+        strategy_bounds: (f64, f64),
+        tactic_bounds: (f64, f64),
+    },
+    /// A score override does not overlap the strategy's score bounds.
+    EmptyScoreInterval {
+        score_key: String,
+        strategy_bounds: (f64, f64),
+        tactic_bounds: (f64, f64),
+    },
 }
 
 impl std::fmt::Display for MergeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Empty interval after merging tactic for ({}, {}): strategy [{}, {}] ∩ tactic [{}, {}] = ∅",
-            self.tag_key, self.tag_value,
-            self.strategy_bounds.0, self.strategy_bounds.1,
-            self.tactic_bounds.0, self.tactic_bounds.1,
-        )
+        match self {
+            MergeError::EmptyGroupInterval {
+                tag_key,
+                tag_value,
+                strategy_bounds: s,
+                tactic_bounds: t,
+            } => write!(
+                f,
+                "Empty interval after merging tactic for ({tag_key}, {tag_value}): \
+                 strategy [{}, {}] ∩ tactic [{}, {}] = ∅",
+                s.0, s.1, t.0, t.1,
+            ),
+            MergeError::EmptyScoreInterval {
+                score_key,
+                strategy_bounds: s,
+                tactic_bounds: t,
+            } => write!(
+                f,
+                "Empty interval after merging tactic for score {score_key}: \
+                 strategy [{}, {}] ∩ tactic [{}, {}] = ∅",
+                s.0, s.1, t.0, t.1,
+            ),
+        }
     }
 }
 
 impl std::error::Error for MergeError {}
+
+/// The interval `(lower, upper)` allowed by all `constraints` on `score_key`
+/// together (±∞ where a side is unbounded).
+fn score_interval(constraints: &[ScoreConstraint], score_key: &str) -> (f64, f64) {
+    let mut lo = f64::NEG_INFINITY;
+    let mut hi = f64::INFINITY;
+    for c in constraints.iter().filter(|c| c.score_key == score_key) {
+        match c.bound {
+            ScoreBound::Min(l) => lo = lo.max(l),
+            ScoreBound::Max(u) => hi = hi.min(u),
+            ScoreBound::Range(l, u) => {
+                lo = lo.max(l);
+                hi = hi.min(u);
+            }
+        }
+    }
+    (lo, hi)
+}
+
+/// Intersect the strategy's and the tactic's bounds on `score_key` into one
+/// constraint. The tactic can only tighten.
+fn merge_score(
+    strategy: &[ScoreConstraint],
+    tactic: &[ScoreConstraint],
+    score_key: &str,
+) -> Result<ScoreConstraint, MergeError> {
+    let s = score_interval(strategy, score_key);
+    let t = score_interval(tactic, score_key);
+    let (lo, hi) = (s.0.max(t.0), s.1.min(t.1));
+    if lo > hi {
+        return Err(MergeError::EmptyScoreInterval {
+            score_key: score_key.to_string(),
+            strategy_bounds: s,
+            tactic_bounds: t,
+        });
+    }
+    let bound = match (lo.is_finite(), hi.is_finite()) {
+        (true, true) => ScoreBound::Range(lo, hi),
+        (true, false) => ScoreBound::Min(lo),
+        // (false, false) cannot happen: the tactic has a constraint on this key
+        _ => ScoreBound::Max(hi),
+    };
+    Ok(ScoreConstraint::new(score_key, bound))
+}
 
 /// The result of merging a strategy with an optional tactic.
 pub struct MergedStrategy {
@@ -114,7 +189,8 @@ pub struct MergedStrategy {
 /// Merge a strategy with an optional tactic.
 ///
 /// - Group constraints are intersected: [max(l_s, l_t), min(u_s, u_t)]
-/// - Score constraints from tactic replace matching ones from strategy
+/// - Score constraints are intersected the same way, per score key: the
+///   higher minimum and the lower maximum win
 /// - Dimension weights from tactic override matching ones by name
 pub fn merge(strategy: &Strategy, tactic: Option<&Tactic>) -> Result<MergedStrategy, MergeError> {
     let tactic = match tactic {
@@ -143,7 +219,7 @@ pub fn merge(strategy: &Strategy, tactic: Option<&Tactic>) -> Result<MergedStrat
             let lower = sg.lower.max(tg.lower);
             let upper = sg.upper.min(tg.upper);
             if lower > upper {
-                return Err(MergeError {
+                return Err(MergeError::EmptyGroupInterval {
                     tag_key: sg.tag_key.clone(),
                     tag_value: sg.tag_value.clone(),
                     strategy_bounds: (sg.lower, sg.upper),
@@ -169,26 +245,23 @@ pub fn merge(strategy: &Strategy, tactic: Option<&Tactic>) -> Result<MergedStrat
         }
     }
 
-    // Merge score constraints: tactic overrides by score_key
-    let mut merged_scores = Vec::new();
-    for ss in &strategy.score_constraints {
-        if let Some(ts) = tactic
-            .score_overrides
-            .iter()
-            .find(|s| s.score_key == ss.score_key)
-        {
-            merged_scores.push(ts.clone());
-        } else {
-            merged_scores.push(ss.clone());
-        }
-    }
-    for ts in &tactic.score_overrides {
-        if !strategy
-            .score_constraints
-            .iter()
-            .any(|s| s.score_key == ts.score_key)
-        {
-            merged_scores.push(ts.clone());
+    // Merge score constraints by intersection. Every score the tactic touches
+    // collapses into one constraint, placed where the strategy first had it
+    // (or appended, for a score only the tactic constrains).
+    let touched = |key: &str| tactic.score_overrides.iter().any(|t| t.score_key == key);
+    let mut merged_scores: Vec<ScoreConstraint> = Vec::new();
+    let mut done: Vec<&str> = Vec::new();
+    for sc in strategy.score_constraints.iter().chain(&tactic.score_overrides) {
+        let key = sc.score_key.as_str();
+        if !touched(key) {
+            merged_scores.push(sc.clone());
+        } else if !done.contains(&key) {
+            done.push(key);
+            merged_scores.push(merge_score(
+                &strategy.score_constraints,
+                &tactic.score_overrides,
+                key,
+            )?);
         }
     }
 
@@ -263,5 +336,72 @@ mod tests {
 
         let result = merge(&s, Some(&t));
         assert!(result.is_err());
+    }
+
+    fn bound_of(merged: &MergedStrategy, key: &str) -> ScoreBound {
+        let all: Vec<_> = merged
+            .score_constraints
+            .iter()
+            .filter(|c| c.score_key == key)
+            .collect();
+        assert_eq!(all.len(), 1, "one merged constraint per touched score");
+        all[0].bound.clone()
+    }
+
+    #[test]
+    fn test_merge_score_tightens_never_loosens() {
+        let s = Strategy::builder("Test")
+            .minimize_risk(1.0)
+            .score_min("esg", 5.0)
+            .score_max("carbon", 3.0)
+            .score_min("untouched", 1.0)
+            .build();
+
+        // esg: a lower tactic minimum must not loosen; carbon: tighter max + new min
+        let t = Tactic::builder("T")
+            .override_score(ScoreConstraint::min("esg", 4.0))
+            .override_score(ScoreConstraint::range("carbon", 1.0, 2.0))
+            .override_score(ScoreConstraint::max("new", 9.0))
+            .build();
+
+        let merged = merge(&s, Some(&t)).unwrap();
+        assert!(matches!(bound_of(&merged, "esg"), ScoreBound::Min(v) if v == 5.0));
+        assert!(matches!(bound_of(&merged, "carbon"), ScoreBound::Range(l, u) if l == 1.0 && u == 2.0));
+        assert!(matches!(bound_of(&merged, "untouched"), ScoreBound::Min(v) if v == 1.0));
+        assert!(matches!(bound_of(&merged, "new"), ScoreBound::Max(v) if v == 9.0));
+        // strategy order kept, tactic-only score appended
+        let keys: Vec<_> = merged.score_constraints.iter().map(|c| c.score_key.as_str()).collect();
+        assert_eq!(keys, ["esg", "carbon", "untouched", "new"]);
+    }
+
+    #[test]
+    fn test_merge_score_combines_min_and_max() {
+        let s = Strategy::builder("Test")
+            .minimize_risk(1.0)
+            .score_min("esg", 5.0)
+            .build();
+        let t = Tactic::builder("T")
+            .override_score(ScoreConstraint::max("esg", 7.0))
+            .build();
+
+        let merged = merge(&s, Some(&t)).unwrap();
+        assert!(matches!(bound_of(&merged, "esg"), ScoreBound::Range(l, u) if l == 5.0 && u == 7.0));
+    }
+
+    #[test]
+    fn test_merge_score_empty_interval_error() {
+        let s = Strategy::builder("Test")
+            .minimize_risk(1.0)
+            .score_min("esg", 5.0)
+            .build();
+        let t = Tactic::builder("Bad")
+            .override_score(ScoreConstraint::max("esg", 4.0))
+            .build();
+
+        assert!(matches!(
+            merge(&s, Some(&t)),
+            Err(MergeError::EmptyScoreInterval { strategy_bounds, tactic_bounds, .. })
+                if strategy_bounds.0 == 5.0 && tactic_bounds.1 == 4.0
+        ));
     }
 }

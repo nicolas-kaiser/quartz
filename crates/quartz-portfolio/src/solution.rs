@@ -8,7 +8,8 @@ pub use quartz_solver::SolveStatus;
 pub struct PortfolioSolution {
     /// Solver status.
     pub status: SolveStatus,
-    /// Optimal weights per asset (only non-excluded, non-zero weights shown).
+    /// Weight of every asset, in universe order (excluded and zero-weight
+    /// assets included).
     pub weights: Vec<(AssetId, f64)>,
     /// All weights as a dense vector (ordered by universe index).
     pub weights_vec: Vec<f64>,
