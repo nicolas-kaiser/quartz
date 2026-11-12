@@ -238,7 +238,7 @@ fn compute_cvar(scenarios: &[Vec<f64>], weights: &[f64], alpha: f64) -> f64 {
         .iter()
         .map(|r| -r.iter().zip(weights).map(|(x, w)| x * w).sum::<f64>())
         .collect();
-    losses.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    losses.sort_by(|a, b| b.total_cmp(a));
     let m = ((1.0 - alpha) * losses.len() as f64).min(losses.len() as f64);
     if m <= 0.0 {
         return losses[0];
