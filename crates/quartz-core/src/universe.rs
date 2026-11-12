@@ -183,73 +183,17 @@ impl Universe {
         values.dedup();
         values
     }
-}
 
-/// Builder for constructing a valid Universe.
-pub struct UniverseBuilder {
-    assets: Vec<Asset>,
-    covariance: Option<CovarianceModel>,
-    scenarios: Option<Vec<Vec<f64>>>,
-}
-
-impl UniverseBuilder {
-    pub fn new() -> Self {
-        Self {
-            assets: Vec::new(),
-            covariance: None,
-            scenarios: None,
-        }
-    }
-
-    /// Attach return scenarios (S rows × n assets, one row per period) for
-    /// scenario-based constraints such as CVaR.
-    pub fn scenarios(mut self, scenarios: Vec<Vec<f64>>) -> Self {
-        self.scenarios = Some(scenarios);
-        self
-    }
-
-    pub fn add_asset(mut self, asset: Asset) -> Self {
-        self.assets.push(asset);
-        self
-    }
-
-    pub fn assets(mut self, assets: Vec<Asset>) -> Self {
-        self.assets = assets;
-        self
-    }
-
-    /// Set a full n×n covariance matrix.
-    pub fn covariance_full(mut self, matrix: CscMatrix<f64>) -> Self {
-        self.covariance = Some(CovarianceModel::Full(matrix));
-        self
-    }
-
-    /// Set a factor covariance model: Σ = B * F * Bᵀ + D.
+    /// Validate internal consistency: at least one asset, unique asset ids,
+    /// finite scores, covariance dimensions matching the asset count, and
+    /// finite scenario rows of the right width.
     ///
-    /// `loadings` is n×k, `factor_cov` is k×k, `specific_variance` has length n
-    /// with all entries ≥ 0. Like `covariance_full`, `factor_cov` must be stored
-    /// full-symmetric (both triangles); the compiler reads its upper triangle.
-    pub fn covariance_factor(
-        mut self,
-        loadings: CscMatrix<f64>,
-        factor_cov: CscMatrix<f64>,
-        specific_variance: Vec<f64>,
-    ) -> Self {
-        self.covariance = Some(CovarianceModel::Factor {
-            loadings,
-            factor_cov,
-            specific_variance,
-        });
-        self
-    }
-
-    /// Validate and build the universe.
-    pub fn build(self) -> Result<Universe, UniverseError> {
+    /// [`UniverseBuilder::build`] runs this; call it on any `Universe`
+    /// constructed directly through the public fields (the compiler does).
+    pub fn validate(&self) -> Result<(), UniverseError> {
         if self.assets.is_empty() {
             return Err(UniverseError::NoAssets);
         }
-
-        let covariance = self.covariance.ok_or(UniverseError::NoCovariance)?;
 
         let n = self.assets.len();
 
@@ -274,7 +218,7 @@ impl UniverseBuilder {
         }
 
         // Validate covariance dimensions
-        match &covariance {
+        match &self.covariance {
             CovarianceModel::Full(cov) => {
                 if cov.m != n || cov.n != n {
                     return Err(UniverseError::DimensionMismatch {
@@ -346,11 +290,83 @@ impl UniverseBuilder {
             }
         }
 
-        Ok(Universe {
+        Ok(())
+    }
+}
+
+/// Builder for constructing a valid Universe.
+pub struct UniverseBuilder {
+    assets: Vec<Asset>,
+    covariance: Option<CovarianceModel>,
+    scenarios: Option<Vec<Vec<f64>>>,
+}
+
+impl UniverseBuilder {
+    pub fn new() -> Self {
+        Self {
+            assets: Vec::new(),
+            covariance: None,
+            scenarios: None,
+        }
+    }
+
+    /// Attach return scenarios (S rows × n assets, one row per period) for
+    /// scenario-based constraints such as CVaR.
+    pub fn scenarios(mut self, scenarios: Vec<Vec<f64>>) -> Self {
+        self.scenarios = Some(scenarios);
+        self
+    }
+
+    pub fn add_asset(mut self, asset: Asset) -> Self {
+        self.assets.push(asset);
+        self
+    }
+
+    pub fn assets(mut self, assets: Vec<Asset>) -> Self {
+        self.assets = assets;
+        self
+    }
+
+    /// Set a full n×n covariance matrix.
+    pub fn covariance_full(mut self, matrix: CscMatrix<f64>) -> Self {
+        self.covariance = Some(CovarianceModel::Full(matrix));
+        self
+    }
+
+    /// Set a factor covariance model: Σ = B * F * Bᵀ + D.
+    ///
+    /// `loadings` is n×k, `factor_cov` is k×k, `specific_variance` has length n
+    /// with all entries ≥ 0. Like `covariance_full`, `factor_cov` must be stored
+    /// full-symmetric (both triangles); the compiler reads its upper triangle.
+    pub fn covariance_factor(
+        mut self,
+        loadings: CscMatrix<f64>,
+        factor_cov: CscMatrix<f64>,
+        specific_variance: Vec<f64>,
+    ) -> Self {
+        self.covariance = Some(CovarianceModel::Factor {
+            loadings,
+            factor_cov,
+            specific_variance,
+        });
+        self
+    }
+
+    /// Validate and build the universe.
+    pub fn build(self) -> Result<Universe, UniverseError> {
+        if self.assets.is_empty() {
+            return Err(UniverseError::NoAssets);
+        }
+
+        let covariance = self.covariance.ok_or(UniverseError::NoCovariance)?;
+
+        let universe = Universe {
             assets: self.assets,
             covariance,
             scenarios: self.scenarios,
-        })
+        };
+        universe.validate()?;
+        Ok(universe)
     }
 }
 
@@ -507,6 +523,33 @@ mod tests {
             Err(UniverseError::InvalidScenarioValue { row: 0, col: 1 })
         ));
         assert!(base().scenarios(vec![]).build().is_err());
+    }
+
+    #[test]
+    fn test_validate_on_hand_constructed_universe() {
+        let valid = Universe {
+            assets: vec![Asset::new("A"), Asset::new("B")],
+            covariance: CovarianceModel::Full(CscMatrix::from(&[[0.04, 0.0], [0.0, 0.01]])),
+            scenarios: None,
+        };
+        assert!(valid.validate().is_ok());
+
+        let dup = Universe {
+            assets: vec![Asset::new("A"), Asset::new("A")],
+            covariance: CovarianceModel::Full(CscMatrix::from(&[[0.04, 0.0], [0.0, 0.01]])),
+            scenarios: None,
+        };
+        assert!(matches!(
+            dup.validate(),
+            Err(UniverseError::DuplicateAssetId(_))
+        ));
+
+        let empty = Universe {
+            assets: vec![],
+            covariance: CovarianceModel::Full(CscMatrix::from(&[[0.04]])),
+            scenarios: None,
+        };
+        assert!(matches!(empty.validate(), Err(UniverseError::NoAssets)));
     }
 
     #[test]

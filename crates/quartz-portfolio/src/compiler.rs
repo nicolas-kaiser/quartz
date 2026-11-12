@@ -51,6 +51,9 @@ pub enum CompileError {
     InvalidTrackingErrorLimit(f64),
     /// Covariance is not positive semidefinite (tracking error needs a Cholesky factor).
     CholeskyFailure(String),
+    /// The universe failed validation (e.g. constructed via its public fields,
+    /// bypassing `UniverseBuilder`).
+    InvalidUniverse(quartz_core::UniverseError),
 }
 
 impl std::fmt::Display for CompileError {
@@ -107,6 +110,7 @@ impl std::fmt::Display for CompileError {
             CompileError::CholeskyFailure(msg) => {
                 write!(f, "Tracking error needs a PSD covariance: {msg}")
             }
+            CompileError::InvalidUniverse(e) => write!(f, "Invalid universe: {e}"),
         }
     }
 }
@@ -116,6 +120,12 @@ impl std::error::Error for CompileError {}
 impl From<tactic::MergeError> for CompileError {
     fn from(e: tactic::MergeError) -> Self {
         CompileError::MergeError(e)
+    }
+}
+
+impl From<quartz_core::UniverseError> for CompileError {
+    fn from(e: quartz_core::UniverseError) -> Self {
+        CompileError::InvalidUniverse(e)
     }
 }
 
@@ -147,6 +157,11 @@ pub fn compile_with_costs(
     turnover: Option<&TurnoverConstraint>,
     costs: Option<&TransactionCosts>,
 ) -> Result<CompiledProblem, CompileError> {
+    // A Universe built through its public fields bypasses UniverseBuilder's
+    // checks; re-validate so a malformed universe fails here with a clear
+    // error instead of an opaque solver failure.
+    universe.validate()?;
+
     let n = universe.n_assets();
 
     if strategy.dimensions.is_empty() {
@@ -543,7 +558,7 @@ fn add_covariance_to_p(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quartz_core::Asset;
+    use quartz_core::{Asset, CovarianceModel, UniverseError};
 
     fn test_universe() -> Universe {
         Universe::builder()
@@ -572,6 +587,65 @@ mod tests {
             ]))
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn test_compile_rejects_hand_constructed_invalid_universe() {
+        let strategy = Strategy::builder("S").minimize_risk(1.0).build();
+        let restrictions = Restrictions::default();
+        let cov2 = || CovarianceModel::Full(CscMatrix::from(&[[0.04, 0.0], [0.0, 0.01]]));
+
+        // Duplicate asset ids
+        let dup = Universe {
+            assets: vec![Asset::new("A"), Asset::new("A")],
+            covariance: cov2(),
+            scenarios: None,
+        };
+        let err = compile(&dup, &strategy, None, &restrictions, None).unwrap_err();
+        assert!(matches!(
+            err,
+            CompileError::InvalidUniverse(UniverseError::DuplicateAssetId(_))
+        ));
+
+        // NaN score
+        let nan_score = Universe {
+            assets: vec![Asset::new("A").score("ret", f64::NAN), Asset::new("B")],
+            covariance: cov2(),
+            scenarios: None,
+        };
+        let err = compile(&nan_score, &strategy, None, &restrictions, None).unwrap_err();
+        assert!(matches!(
+            err,
+            CompileError::InvalidUniverse(UniverseError::InvalidScore { .. })
+        ));
+
+        // Covariance size does not match asset count
+        let bad_cov = Universe {
+            assets: vec![Asset::new("A"), Asset::new("B")],
+            covariance: CovarianceModel::Full(CscMatrix::from(&[[0.04, 0.006, 0.002], [0.006, 0.09, 0.009], [0.002, 0.009, 0.01]])),
+            scenarios: None,
+        };
+        let err = compile(&bad_cov, &strategy, None, &restrictions, None).unwrap_err();
+        assert!(matches!(
+            err,
+            CompileError::InvalidUniverse(UniverseError::DimensionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_compile_accepts_hand_constructed_valid_universe() {
+        let universe = Universe {
+            assets: vec![
+                Asset::new("A").score("expected_return", 0.10),
+                Asset::new("B").score("expected_return", 0.05),
+            ],
+            covariance: CovarianceModel::Full(CscMatrix::from(&[[0.04, 0.0], [0.0, 0.01]])),
+            scenarios: None,
+        };
+        let strategy = Strategy::builder("S").minimize_risk(1.0).build();
+        let restrictions = Restrictions::builder().long_only().fully_invested().build();
+        let problem = compile(&universe, &strategy, None, &restrictions, None).unwrap();
+        assert_eq!(problem.n_assets, 2);
     }
 
     #[test]
