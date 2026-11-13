@@ -43,6 +43,20 @@ def test_min_variance_analytic():
     assert sol.iterations > 0
 
 
+def test_solution_exposes_raw_vectors_and_warm_start():
+    u = diag_universe()
+    s = quartz.Strategy("MinVar").minimize_risk(1.0)
+    r = base_restrictions()
+    sol = quartz.solve(u, s, restrictions=r)
+    assert len(sol.raw_x) == 3  # no aux vars for a full-covariance min-variance
+    assert len(sol.raw_z) >= 1
+    # warm_start accepts a previous Solution (Clarabel ignores the hint)
+    sol2 = quartz.solve(u, s, restrictions=r, warm_start=sol)
+    assert sol2.status == quartz.SolveStatus.Optimal
+    for a, b in zip(sol.weights_vec, sol2.weights_vec):
+        assert abs(a - b) < 1e-9
+
+
 def test_numpy_and_list_input_parity():
     cov_list = [[0.01, 0.0, 0.0], [0.0, 0.04, 0.0], [0.0, 0.0, 0.16]]
     assets = lambda: [  # noqa: E731

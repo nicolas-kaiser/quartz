@@ -35,6 +35,14 @@ pub struct Solution {
     pub solve_time_s: f64,
     #[pyo3(get)]
     pub iterations: u32,
+    /// Full primal vector `[w, t?, y_factor?, cvar_aux?]` including auxiliary
+    /// variables. Pass a previous `Solution` as `warm_start` to `solve` to seed
+    /// the next solve with it (only the OSQP backend exploits the hint).
+    #[pyo3(get)]
+    pub raw_x: Vec<f64>,
+    /// Full dual vector (same sign convention on all backends).
+    #[pyo3(get)]
+    pub raw_z: Vec<f64>,
 }
 
 impl Solution {
@@ -51,6 +59,8 @@ impl Solution {
             objective_value: sol.objective_value,
             solve_time_s: sol.solve_time_s,
             iterations: sol.iterations,
+            raw_x: sol.raw_x,
+            raw_z: sol.raw_z,
         }
     }
 }
@@ -103,10 +113,12 @@ fn settings(
 /// `turnover=(previous_weights, max_turnover)`; `transaction_costs=(rates, score_key)`
 /// makes `score_key` net of `Σ rates[i]·|w_i − previous_i|` wherever the strategy
 /// wants more of it (needs `turnover`; see `docs/transaction-costs.md`).
+/// `warm_start=<previous Solution>` seeds the solver with that solution's
+/// `raw_x`/`raw_z` (only the OSQP backend exploits the hint; Clarabel ignores it).
 #[pyfunction]
 #[pyo3(signature = (universe, strategy, *, tactic=None, restrictions=None, turnover=None,
                     transaction_costs=None, max_iter=200, verbose=false,
-                    tol_gap_abs=1e-8, tol_gap_rel=1e-8, tol_feas=1e-8))]
+                    tol_gap_abs=1e-8, tol_gap_rel=1e-8, tol_feas=1e-8, warm_start=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve(
     py: Python<'_>,
@@ -121,6 +133,7 @@ pub fn solve(
     tol_gap_abs: f64,
     tol_gap_rel: f64,
     tol_feas: f64,
+    warm_start: Option<&Solution>,
 ) -> PyResult<Solution> {
     // Extract owned Rust values before detaching (PyRef is not Send).
     let u = universe.inner.clone();
@@ -128,6 +141,7 @@ pub fn solve(
     let t = tactic.map(|t| t.to_tactic());
     let r = restrictions.map(|r| r.inner.clone()).unwrap_or_default();
     let solver_settings = settings(max_iter, verbose, tol_gap_abs, tol_gap_rel, tol_feas);
+    let ws = warm_start.map(|sol| (sol.raw_x.clone(), sol.raw_z.clone()));
 
     let result = py.detach(move || {
         let mut model = PortfolioModel::new(&u)
@@ -142,6 +156,9 @@ pub fn solve(
         }
         if let Some((rates, key)) = transaction_costs {
             model = model.transaction_costs(rates, key);
+        }
+        if let Some((x, z)) = ws {
+            model = model.warm_start_raw(x, z);
         }
         model.solve()
     });
@@ -339,6 +356,7 @@ fn frontier_from_rust(
 
 /// Trade two dimensions against each other over `n_points` steps.
 /// Dimension names are the score key, or "financial_risk" for the risk dim.
+/// At most 10,000 points are explored; `n_points` above that raises `QuartzError`.
 #[pyfunction]
 #[pyo3(signature = (universe, strategy, dim_a, dim_b, n_points=25, *,
                     tactic=None, restrictions=None, turnover=None,
@@ -379,6 +397,7 @@ pub fn sweep(
 }
 
 /// Enumerate a full simplex lattice over every strategy dimension.
+/// At most 10,000 points are explored; a grid larger than that raises `QuartzError`.
 #[pyfunction]
 #[pyo3(signature = (universe, strategy, resolution=5, *,
                     tactic=None, restrictions=None, turnover=None,

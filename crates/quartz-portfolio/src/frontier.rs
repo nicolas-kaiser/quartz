@@ -70,7 +70,15 @@ impl std::fmt::Display for FrontierError {
     }
 }
 
-impl std::error::Error for FrontierError {}
+impl std::error::Error for FrontierError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            FrontierError::Merge(e) => Some(e),
+            FrontierError::Portfolio(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 impl From<PortfolioError> for FrontierError {
     fn from(e: PortfolioError) -> Self {
