@@ -129,6 +129,7 @@ pub struct Universe {
 }
 
 impl Universe {
+    #[must_use]
     pub fn builder() -> UniverseBuilder {
         UniverseBuilder::new()
     }
@@ -302,6 +303,7 @@ pub struct UniverseBuilder {
 }
 
 impl UniverseBuilder {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             assets: Vec::new(),
@@ -312,22 +314,26 @@ impl UniverseBuilder {
 
     /// Attach return scenarios (S rows × n assets, one row per period) for
     /// scenario-based constraints such as CVaR.
+    #[must_use]
     pub fn scenarios(mut self, scenarios: Vec<Vec<f64>>) -> Self {
         self.scenarios = Some(scenarios);
         self
     }
 
+    #[must_use]
     pub fn add_asset(mut self, asset: Asset) -> Self {
         self.assets.push(asset);
         self
     }
 
+    #[must_use]
     pub fn assets(mut self, assets: Vec<Asset>) -> Self {
         self.assets = assets;
         self
     }
 
     /// Set a full n×n covariance matrix.
+    #[must_use]
     pub fn covariance_full(mut self, matrix: CscMatrix<f64>) -> Self {
         self.covariance = Some(CovarianceModel::Full(matrix));
         self
@@ -338,6 +344,7 @@ impl UniverseBuilder {
     /// `loadings` is n×k, `factor_cov` is k×k, `specific_variance` has length n
     /// with all entries ≥ 0. Like `covariance_full`, `factor_cov` must be stored
     /// full-symmetric (both triangles); the compiler reads its upper triangle.
+    #[must_use]
     pub fn covariance_factor(
         mut self,
         loadings: CscMatrix<f64>,

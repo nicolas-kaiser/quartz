@@ -23,6 +23,7 @@ pub struct Tactic {
 }
 
 impl Tactic {
+    #[must_use]
     pub fn builder(name: impl Into<String>) -> TacticBuilder {
         TacticBuilder {
             name: name.into(),
@@ -44,6 +45,7 @@ pub struct TacticBuilder {
 impl TacticBuilder {
     /// Override a group constraint bound. During merge, the interval will be
     /// intersected with the strategy's bound.
+    #[must_use]
     pub fn override_group(
         mut self,
         tag_key: impl Into<String>,
@@ -58,12 +60,14 @@ impl TacticBuilder {
 
     /// Tighten a score constraint. During merge, the bound is intersected
     /// with the strategy's bounds on the same score.
+    #[must_use]
     pub fn override_score(mut self, constraint: ScoreConstraint) -> Self {
         self.score_overrides.push(constraint);
         self
     }
 
     /// Override the weight of a dimension by name.
+    #[must_use]
     pub fn override_weight(mut self, dimension_name: impl Into<String>, weight: f64) -> Self {
         self.dimension_weight_overrides
             .insert(dimension_name.into(), weight);

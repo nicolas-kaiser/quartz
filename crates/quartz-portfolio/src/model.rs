@@ -62,6 +62,7 @@ pub struct PortfolioModel<'a> {
 }
 
 impl<'a> PortfolioModel<'a> {
+    #[must_use]
     pub fn new(universe: &'a Universe) -> Self {
         Self {
             universe,
@@ -76,21 +77,25 @@ impl<'a> PortfolioModel<'a> {
         }
     }
 
+    #[must_use]
     pub fn strategy(mut self, strategy: &'a Strategy) -> Self {
         self.strategy = Some(strategy);
         self
     }
 
+    #[must_use]
     pub fn tactic(mut self, tactic: &'a Tactic) -> Self {
         self.tactic = Some(tactic);
         self
     }
 
+    #[must_use]
     pub fn restrictions(mut self, restrictions: Restrictions) -> Self {
         self.restrictions = restrictions;
         self
     }
 
+    #[must_use]
     pub fn turnover(mut self, previous_weights: Vec<f64>, max_turnover: f64) -> Self {
         self.turnover = Some(TurnoverConstraint::new(previous_weights, max_turnover));
         self
@@ -99,16 +104,19 @@ impl<'a> PortfolioModel<'a> {
     /// Transaction costs: `score_key` becomes net of `Σᵢ rates[i]·|wᵢ − wᵢ_prev|`
     /// wherever the strategy wants more of it (see [`TransactionCosts`]).
     /// Needs [`turnover`](Self::turnover) (in any order); checked at solve time.
+    #[must_use]
     pub fn transaction_costs(mut self, rates: Vec<f64>, score_key: impl Into<String>) -> Self {
         self.transaction_costs = Some(TransactionCosts::new(rates, score_key));
         self
     }
 
+    #[must_use]
     pub fn verbose(mut self, verbose: bool) -> Self {
         self.solver_settings.verbose = verbose;
         self
     }
 
+    #[must_use]
     pub fn solver_settings(mut self, settings: SolverSettings) -> Self {
         self.solver_settings = settings;
         self
@@ -117,6 +125,7 @@ impl<'a> PortfolioModel<'a> {
     /// Select the QP solver backend. When using OSQP, pair with
     /// `SolverSettings::default_for(Backend::Osqp)` — Clarabel-tuned settings
     /// (max_iter 200, tol 1e-8) usually end in `MaxIterations` under ADMM.
+    #[must_use]
     pub fn backend(mut self, backend: Backend) -> Self {
         self.backend = backend;
         self
@@ -125,6 +134,7 @@ impl<'a> PortfolioModel<'a> {
     /// Seed the solver with a previous solution of a structurally identical
     /// problem (same universe size, same turnover/factor setup). Only OSQP
     /// can exploit the hint; Clarabel accepts and ignores it.
+    #[must_use]
     pub fn warm_start(mut self, previous: &PortfolioSolution) -> Self {
         self.warm_start = Some(WarmStart {
             x: previous.raw_x.clone(),
