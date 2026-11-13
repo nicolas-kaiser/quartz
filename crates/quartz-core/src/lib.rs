@@ -4,4 +4,4 @@ pub mod universe;
 
 pub use asset::{Asset, AssetId};
 pub use dimension::{Dimension, DimensionType, Sense};
-pub use universe::{CovarianceModel, Universe, UniverseBuilder};
+pub use universe::{CovarianceModel, Universe, UniverseBuilder, UniverseError};
