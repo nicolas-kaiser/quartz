@@ -87,7 +87,10 @@ def test_factor_model_matches_densified():
     assert sol_f.status == quartz.SolveStatus.Optimal
     for wf, wd in zip(sol_f.weights_vec, sol_d.weights_vec):
         assert abs(wf - wd) < 1e-6
-    assert abs(sol_f.portfolio_scores["financial_risk"] - sol_d.portfolio_scores["financial_risk"]) < 1e-8
+    # 1e-6 like the weights above: the two QP formulations solve to slightly
+    # different optima within the solver's own 1e-8 tolerance, and variance
+    # (a quadratic of the weights) amplifies that difference.
+    assert abs(sol_f.portfolio_scores["financial_risk"] - sol_d.portfolio_scores["financial_risk"]) < 1e-6
 
 
 def test_restrictions():
