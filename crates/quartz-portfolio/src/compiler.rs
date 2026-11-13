@@ -115,7 +115,15 @@ impl std::fmt::Display for CompileError {
     }
 }
 
-impl std::error::Error for CompileError {}
+impl std::error::Error for CompileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CompileError::MergeError(e) => Some(e),
+            CompileError::InvalidUniverse(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 impl From<tactic::MergeError> for CompileError {
     fn from(e: tactic::MergeError) -> Self {

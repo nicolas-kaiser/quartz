@@ -26,7 +26,14 @@ impl std::fmt::Display for PortfolioError {
     }
 }
 
-impl std::error::Error for PortfolioError {}
+impl std::error::Error for PortfolioError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PortfolioError::Compile(e) => Some(e),
+            PortfolioError::Solver(e) => Some(e),
+        }
+    }
+}
 
 impl From<CompileError> for PortfolioError {
     fn from(e: CompileError) -> Self {
@@ -135,11 +142,16 @@ impl<'a> PortfolioModel<'a> {
     /// problem (same universe size, same turnover/factor setup). Only OSQP
     /// can exploit the hint; Clarabel accepts and ignores it.
     #[must_use]
-    pub fn warm_start(mut self, previous: &PortfolioSolution) -> Self {
-        self.warm_start = Some(WarmStart {
-            x: previous.raw_x.clone(),
-            y: previous.raw_z.clone(),
-        });
+    pub fn warm_start(self, previous: &PortfolioSolution) -> Self {
+        self.warm_start_raw(previous.raw_x.clone(), previous.raw_z.clone())
+    }
+
+    /// Like [`warm_start`](Self::warm_start), but from raw primal/dual vectors
+    /// (e.g. `PortfolioSolution::raw_x` / `raw_z` carried across a language
+    /// boundary, where no `PortfolioSolution` exists).
+    #[must_use]
+    pub fn warm_start_raw(mut self, x: Vec<f64>, y: Vec<f64>) -> Self {
+        self.warm_start = Some(WarmStart { x, y });
         self
     }
 
@@ -834,5 +846,37 @@ mod tests {
             err,
             PortfolioError::Compile(CompileError::TransactionCostsWithoutTurnover)
         ));
+    }
+
+    #[test]
+    fn test_warm_start_raw_accepted() {
+        let universe = dense_universe();
+        let strategy = Strategy::builder("S").minimize_risk(1.0).build();
+        let restrictions = Restrictions::builder().long_only().fully_invested().build();
+        let sol = PortfolioModel::new(&universe)
+            .strategy(&strategy)
+            .restrictions(restrictions.clone())
+            .solve()
+            .unwrap();
+        // Clarabel ignores the hint; the solve must still succeed identically.
+        let warmed = PortfolioModel::new(&universe)
+            .strategy(&strategy)
+            .restrictions(restrictions)
+            .warm_start_raw(sol.raw_x.clone(), sol.raw_z.clone())
+            .solve()
+            .unwrap();
+        assert_eq!(warmed.status, sol.status);
+        for (a, b) in warmed.weights_vec.iter().zip(&sol.weights_vec) {
+            assert!((a - b).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_error_source_chains() {
+        use std::error::Error;
+        let err = PortfolioError::Compile(CompileError::NoDimensions);
+        assert!(err.source().is_some_and(|s| s.is::<CompileError>()));
+        let inner = CompileError::InvalidUniverse(quartz_core::UniverseError::NoAssets);
+        assert!(inner.source().is_some_and(|s| s.is::<quartz_core::UniverseError>()));
     }
 }
