@@ -39,6 +39,7 @@ pub struct BatchProblem<'a> {
 }
 
 impl<'a> BatchProblem<'a> {
+    #[must_use]
     pub fn new(universe: &'a Universe, strategy: &'a Strategy) -> Self {
         Self {
             universe,
@@ -50,22 +51,26 @@ impl<'a> BatchProblem<'a> {
         }
     }
 
+    #[must_use]
     pub fn tactic(mut self, tactic: &'a Tactic) -> Self {
         self.tactic = Some(tactic);
         self
     }
 
+    #[must_use]
     pub fn restrictions(mut self, restrictions: Restrictions) -> Self {
         self.restrictions = restrictions;
         self
     }
 
+    #[must_use]
     pub fn turnover(mut self, previous_weights: Vec<f64>, max_turnover: f64) -> Self {
         self.turnover = Some((previous_weights, max_turnover));
         self
     }
 
     /// Per-item transaction costs (see [`PortfolioModel::transaction_costs`]).
+    #[must_use]
     pub fn transaction_costs(mut self, rates: Vec<f64>, score_key: impl Into<String>) -> Self {
         self.transaction_costs = Some((rates, score_key.into()));
         self

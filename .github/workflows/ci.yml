@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --workspace --all-targets
+      - run: cargo test --workspace
+      # Serial fallback (no rayon) must also pass
+      - run: cargo test -p quartz-portfolio --no-default-features
+
+  python:
+    name: python bindings (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m venv .venv
+      - run: .venv/bin/pip install maturin pytest numpy
+      - run: VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m crates/quartz-python/Cargo.toml
+      - run: .venv/bin/pytest crates/quartz-python/tests -q
+
+  osqp:
+    name: OSQP backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y cmake build-essential
+      - run: cargo test -p quartz-solver --features osqp
+      - run: cargo test -p quartz-portfolio --features osqp

@@ -428,12 +428,15 @@ fn run(spec: ProblemSpec) -> Result<String, String> {
         for b in &built {
             match b {
                 Err(e) => solutions.push(BatchItemOutput::Err { error: e.clone() }),
-                Ok(u) => match results_iter.next().expect("one result per built universe") {
-                    Ok(sol) => {
+                Ok(u) => match results_iter.next() {
+                    Some(Ok(sol)) => {
                         sum_solve_time_s += sol.solve_time_s;
                         solutions.push(BatchItemOutput::Ok(solution_output(u, sol)));
                     }
-                    Err(e) => solutions.push(BatchItemOutput::Err { error: e.to_string() }),
+                    Some(Err(e)) => solutions.push(BatchItemOutput::Err { error: e.to_string() }),
+                    None => solutions.push(BatchItemOutput::Err {
+                        error: "internal error: missing solve result".into(),
+                    }),
                 },
             }
         }
@@ -444,10 +447,11 @@ fn run(spec: ProblemSpec) -> Result<String, String> {
             sum_solve_time_s,
         };
         // Compact JSON: pretty-printing triples the size of large batches.
-        return Ok(serde_json::to_string(&out).unwrap());
+        return serde_json::to_string(&out)
+            .map_err(|e| format!("failed to serialize batch output: {e}"));
     }
 
-    let universe = universe.expect("universe is built for non-batch modes");
+    let universe = universe.ok_or("internal error: universe missing for non-batch mode")?;
 
     // Frontier exploration mode
     if let Some(fs) = &spec.frontier {
@@ -465,7 +469,8 @@ fn run(spec: ProblemSpec) -> Result<String, String> {
             other => return Err(format!("unknown frontier mode '{other}' (expected sweep|grid)")),
         }
         .map_err(|e| e.to_string())?;
-        return Ok(serde_json::to_string_pretty(&result).unwrap());
+        return serde_json::to_string_pretty(&result)
+            .map_err(|e| format!("failed to serialize frontier result: {e}"));
     }
 
     // Single solve
@@ -477,7 +482,7 @@ fn run(spec: ProblemSpec) -> Result<String, String> {
     }
     let solution = model.solve().map_err(|e| e.to_string())?;
     let out = solution_output(&universe, solution);
-    Ok(serde_json::to_string_pretty(&out).unwrap())
+    serde_json::to_string_pretty(&out).map_err(|e| format!("failed to serialize solution: {e}"))
 }
 
 fn main() {

@@ -19,6 +19,7 @@ pub struct Restrictions {
 }
 
 impl Restrictions {
+    #[must_use]
     pub fn builder() -> RestrictionsBuilder {
         RestrictionsBuilder::default()
     }
@@ -33,26 +34,31 @@ pub struct RestrictionsBuilder {
 }
 
 impl RestrictionsBuilder {
+    #[must_use]
     pub fn exclude_tag(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.exclusions.push(Exclusion::by_tag(key, value));
         self
     }
 
+    #[must_use]
     pub fn exclude_asset(mut self, id: impl Into<quartz_core::AssetId>) -> Self {
         self.exclusions.push(Exclusion::by_asset(id));
         self
     }
 
+    #[must_use]
     pub fn max_single_weight(mut self, max: f64) -> Self {
         self.max_single_weight = Some(max);
         self
     }
 
+    #[must_use]
     pub fn long_only(mut self) -> Self {
         self.long_only = true;
         self
     }
 
+    #[must_use]
     pub fn fully_invested(mut self) -> Self {
         self.fully_invested = true;
         self

@@ -43,6 +43,7 @@ impl Strategy {
         }
     }
 
+    #[must_use]
     pub fn builder(name: impl Into<String>) -> StrategyBuilder {
         StrategyBuilder {
             name: name.into(),
@@ -70,6 +71,7 @@ pub struct StrategyBuilder {
 
 impl StrategyBuilder {
     /// Add the quadratic risk dimension (minimize portfolio variance).
+    #[must_use]
     pub fn minimize_risk(mut self, weight: f64) -> Self {
         self.dimensions.push(Dimension::quadratic(
             "financial_risk",
@@ -80,6 +82,7 @@ impl StrategyBuilder {
     }
 
     /// Add a linear dimension to minimize (e.g. physical risk, transition risk).
+    #[must_use]
     pub fn minimize(mut self, score_key: impl Into<String>, weight: f64) -> Self {
         let key: String = score_key.into();
         self.dimensions
@@ -88,6 +91,7 @@ impl StrategyBuilder {
     }
 
     /// Add a linear dimension to maximize (e.g. expected return, ESG score).
+    #[must_use]
     pub fn maximize(mut self, score_key: impl Into<String>, weight: f64) -> Self {
         let key: String = score_key.into();
         self.dimensions
@@ -96,12 +100,14 @@ impl StrategyBuilder {
     }
 
     /// Add a custom dimension with full control.
+    #[must_use]
     pub fn dimension(mut self, dim: Dimension) -> Self {
         self.dimensions.push(dim);
         self
     }
 
     /// Add a group allocation constraint.
+    #[must_use]
     pub fn group(
         mut self,
         tag_key: impl Into<String>,
@@ -115,6 +121,7 @@ impl StrategyBuilder {
     }
 
     /// Add a minimum portfolio score constraint.
+    #[must_use]
     pub fn score_min(mut self, score_key: impl Into<String>, threshold: f64) -> Self {
         self.score_constraints
             .push(ScoreConstraint::min(score_key, threshold));
@@ -122,6 +129,7 @@ impl StrategyBuilder {
     }
 
     /// Add a maximum portfolio score constraint.
+    #[must_use]
     pub fn score_max(mut self, score_key: impl Into<String>, threshold: f64) -> Self {
         self.score_constraints
             .push(ScoreConstraint::max(score_key, threshold));
@@ -129,6 +137,7 @@ impl StrategyBuilder {
     }
 
     /// Set whether the portfolio must be fully invested (Σw = 1).
+    #[must_use]
     pub fn fully_invested(mut self, val: bool) -> Self {
         self.fully_invested = val;
         self
@@ -137,6 +146,7 @@ impl StrategyBuilder {
     /// Limit tracking error vs a benchmark: ‖w − w_b‖_Σ ≤ max_te.
     /// `benchmark_weights` is ordered by universe index; `max_te` is in the
     /// covariance's units (e.g. annualized volatility).
+    #[must_use]
     pub fn max_tracking_error(mut self, benchmark_weights: Vec<f64>, max_te: f64) -> Self {
         self.tracking_error = Some(TrackingErrorConstraint::new(benchmark_weights, max_te));
         self
@@ -145,6 +155,7 @@ impl StrategyBuilder {
     /// Limit CVaR at confidence `alpha` (e.g. 0.95 = expected loss over the
     /// worst 5% of the universe's return scenarios) to `max_cvar`, in the
     /// scenarios' return units.
+    #[must_use]
     pub fn max_cvar(mut self, alpha: f64, max_cvar: f64) -> Self {
         self.cvar = Some(CvarConstraint::new(alpha, max_cvar));
         self

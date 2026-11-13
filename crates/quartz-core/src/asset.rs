@@ -36,6 +36,7 @@ pub struct Asset {
 
 impl Asset {
     /// Create a new asset with the given identifier.
+    #[must_use]
     pub fn new(id: impl Into<AssetId>) -> Self {
         Self {
             id: id.into(),
@@ -45,12 +46,14 @@ impl Asset {
     }
 
     /// Add a categorical tag (e.g. "currency" = "USD").
+    #[must_use]
     pub fn tag(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.tags.insert(key.into(), value.into());
         self
     }
 
     /// Add a numerical score (e.g. "physical_risk" = 2.1).
+    #[must_use]
     pub fn score(mut self, key: impl Into<String>, value: f64) -> Self {
         self.scores.insert(key.into(), value);
         self
