@@ -82,11 +82,19 @@ impl Solution {
     }
 }
 
-fn settings(max_iter: u32, verbose: bool) -> SolverSettings {
+fn settings(
+    max_iter: u32,
+    verbose: bool,
+    tol_gap_abs: f64,
+    tol_gap_rel: f64,
+    tol_feas: f64,
+) -> SolverSettings {
     SolverSettings {
         verbose,
         max_iter,
-        ..SolverSettings::default()
+        tol_gap_abs,
+        tol_gap_rel,
+        tol_feas,
     }
 }
 
@@ -97,7 +105,8 @@ fn settings(max_iter: u32, verbose: bool) -> SolverSettings {
 /// wants more of it (needs `turnover`; see `docs/transaction-costs.md`).
 #[pyfunction]
 #[pyo3(signature = (universe, strategy, *, tactic=None, restrictions=None, turnover=None,
-                    transaction_costs=None, max_iter=200, verbose=false))]
+                    transaction_costs=None, max_iter=200, verbose=false,
+                    tol_gap_abs=1e-8, tol_gap_rel=1e-8, tol_feas=1e-8))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve(
     py: Python<'_>,
@@ -109,13 +118,16 @@ pub fn solve(
     transaction_costs: Option<(Vec<f64>, String)>,
     max_iter: u32,
     verbose: bool,
+    tol_gap_abs: f64,
+    tol_gap_rel: f64,
+    tol_feas: f64,
 ) -> PyResult<Solution> {
     // Extract owned Rust values before detaching (PyRef is not Send).
     let u = universe.inner.clone();
     let s = strategy.to_strategy();
     let t = tactic.map(|t| t.to_tactic());
     let r = restrictions.map(|r| r.inner.clone()).unwrap_or_default();
-    let solver_settings = settings(max_iter, verbose);
+    let solver_settings = settings(max_iter, verbose, tol_gap_abs, tol_gap_rel, tol_feas);
 
     let result = py.detach(move || {
         let mut model = PortfolioModel::new(&u)
@@ -160,13 +172,17 @@ struct OwnedItem {
 /// `restrictions`/`tactic` kwargs are defaults for items that don't carry
 /// their own.
 #[pyfunction]
-#[pyo3(signature = (problems, *, restrictions=None, tactic=None, max_iter=200))]
+#[pyo3(signature = (problems, *, restrictions=None, tactic=None, max_iter=200,
+                    tol_gap_abs=1e-8, tol_gap_rel=1e-8, tol_feas=1e-8))]
 pub fn solve_batch(
     py: Python<'_>,
     problems: Vec<BatchInput<'_>>,
     restrictions: Option<&Restrictions>,
     tactic: Option<&Tactic>,
     max_iter: u32,
+    tol_gap_abs: f64,
+    tol_gap_rel: f64,
+    tol_feas: f64,
 ) -> PyResult<Vec<Py<pyo3::types::PyAny>>> {
     let default_r = restrictions.map(|r| r.inner.clone()).unwrap_or_default();
     let default_t = tactic.map(|t| t.to_tactic());
@@ -196,7 +212,7 @@ pub fn solve_batch(
             },
         })
         .collect();
-    let solver_settings = settings(max_iter, false);
+    let solver_settings = settings(max_iter, false, tol_gap_abs, tol_gap_rel, tol_feas);
 
     let results = py.detach(move || {
         let batch: Vec<BatchProblem> = items
