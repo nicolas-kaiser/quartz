@@ -401,3 +401,58 @@ def test_tactic():
     sol = quartz.solve(u, s, tactic=t, restrictions=base_restrictions())
     assert sol.status == quartz.SolveStatus.Optimal
     assert sol.weights["B"] >= 0.6 - 1e-6
+
+
+def esg_universe(esg_scale=1.0):
+    assets = [
+        quartz.Asset("AAPL", scores={"expected_return": 0.10, "esg": 6.5 * esg_scale}),
+        quartz.Asset("NESN", scores={"expected_return": 0.04, "esg": 8.0 * esg_scale}),
+        quartz.Asset("BOND", scores={"expected_return": 0.025, "esg": 9.5 * esg_scale}),
+    ]
+    cov = [[0.04, 0.002, 0.001], [0.002, 0.01, 0.001], [0.001, 0.001, 0.003]]
+    return quartz.Universe(assets=assets, covariance=cov)
+
+
+def return_vs_esg():
+    return quartz.Strategy("S").maximize("expected_return", 0.7).maximize("esg", 0.3)
+
+
+def test_range_normalization_is_the_default():
+    r = base_restrictions()
+    sol = quartz.solve(esg_universe(), return_vs_esg(), restrictions=r)
+    # 70% return beats 30% ESG once both are measured on their feasible range
+    assert sol.weights["AAPL"] > 0.999
+    assert list(sol.dimension_ranges) == ["expected_return", "esg"]
+    best, worst = sol.dimension_ranges["esg"]
+    assert best == pytest.approx(9.5, abs=1e-6) and worst == pytest.approx(6.5, abs=1e-6)
+    # ... and the units of a score do not matter
+    scaled = quartz.solve(esg_universe(10.0), return_vs_esg(), restrictions=r)
+    assert scaled.weights_vec == pytest.approx(sol.weights_vec, abs=1e-5)
+
+
+def test_raw_normalization_weights_raw_values():
+    s = return_vs_esg().normalization("raw")
+    sol = quartz.solve(esg_universe(), s, restrictions=base_restrictions())
+    # 0.3 × 3 ESG points swamps 0.7 × 7.5% return
+    assert sol.weights["BOND"] > 0.999
+    assert sol.dimension_ranges == {}
+    with pytest.raises(quartz.QuartzError, match="unknown normalization"):
+        quartz.Strategy("S").normalization("zscore")
+
+
+def test_unbounded_dimension_needs_raw():
+    s = quartz.Strategy("S").minimize_risk(0.5).maximize("expected_return", 0.5)
+    r = quartz.Restrictions(fully_invested=True)  # shorting allowed
+    with pytest.raises(quartz.QuartzError, match="expected_return"):
+        quartz.solve(diag_universe(), s, restrictions=r)
+    assert quartz.solve(diag_universe(), s.normalization("raw"), restrictions=r).is_optimal
+
+
+def test_frontier_shares_one_set_of_ranges():
+    s = quartz.Strategy("S").minimize_risk(0.5).maximize("expected_return", 0.5)
+    fr = quartz.sweep(
+        diag_universe(), s, "financial_risk", "expected_return", 5,
+        restrictions=base_restrictions(),
+    )
+    assert list(fr.dimension_ranges) == ["financial_risk", "expected_return"]
+    assert fr.dimension_ranges["expected_return"][0] == pytest.approx(0.10, abs=1e-6)

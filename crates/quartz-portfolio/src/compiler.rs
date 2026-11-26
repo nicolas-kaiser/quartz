@@ -157,6 +157,10 @@ pub fn compile(
 
 /// [`compile`] with transaction costs: the score `costs.score_key` becomes net
 /// of costs wherever more of it is wanted (see [`TransactionCosts`]).
+///
+/// Like [`compile`], this applies the dimension weights to the raw values,
+/// whatever `strategy.normalization` says: range normalisation needs solves
+/// and is done by `PortfolioModel::solve`.
 pub fn compile_with_costs(
     universe: &Universe,
     strategy: &Strategy,
@@ -164,6 +168,21 @@ pub fn compile_with_costs(
     restrictions: &Restrictions,
     turnover: Option<&TurnoverConstraint>,
     costs: Option<&TransactionCosts>,
+) -> Result<CompiledProblem, CompileError> {
+    compile_scaled(universe, strategy, tactic, restrictions, turnover, costs, None)
+}
+
+/// [`compile_with_costs`] with one divisor per dimension (in the order of
+/// `strategy.dimensions`): dimension k enters the objective as
+/// `weight · sign · value / scales[k]`.
+pub(crate) fn compile_scaled(
+    universe: &Universe,
+    strategy: &Strategy,
+    tactic: Option<&Tactic>,
+    restrictions: &Restrictions,
+    turnover: Option<&TurnoverConstraint>,
+    costs: Option<&TransactionCosts>,
+    scales: Option<&[f64]>,
 ) -> Result<CompiledProblem, CompileError> {
     // A Universe built through its public fields bypasses UniverseBuilder's
     // checks; re-validate so a malformed universe fails here with a clear
@@ -264,7 +283,7 @@ pub fn compile_with_costs(
         .collect();
 
     // Step 3: Build objective (P, q)
-    let (p, q) = build_objective(universe, &merged, n_vars, y_offset, costs)?;
+    let (p, q) = build_objective(universe, &merged, n_vars, y_offset, costs, scales)?;
 
     // Step 4: Collect all constraints
     let mut eq_contributions: Vec<ConstraintContribution> = Vec::new();
@@ -434,12 +453,16 @@ pub fn compile_with_costs(
 /// With `costs`, a linear dimension that maximises `costs.score_key` maximises
 /// it net of costs: `q[n + i] −= factor·cᵢ` on the turnover variables t
 /// (columns n..2n), in the dimension's own (normalised) weight.
+///
+/// With `scales`, dimension k's coefficient is divided by `scales[k]`
+/// (a missing entry counts as 1).
 fn build_objective(
     universe: &Universe,
     merged: &MergedStrategy,
     n_vars: usize,
     y_offset: usize,
     costs: Option<&TransactionCosts>,
+    scales: Option<&[f64]>,
 ) -> Result<(CscMatrix<f64>, Vec<f64>), CompileError> {
     let n = universe.n_assets();
     let mut q = vec![0.0; n_vars];
@@ -453,16 +476,17 @@ fn build_objective(
     let mut lambda_quad = 0.0;
     let mut has_quadratic = false;
 
-    for dim in &merged.dimensions {
+    for (k, dim) in merged.dimensions.iter().enumerate() {
+        let scale = scales.and_then(|s| s.get(k)).copied().unwrap_or(1.0);
+        let factor = dim.weight * dim.sense.sign() / scale;
         match &dim.dim_type {
             DimensionType::Quadratic => {
                 has_quadratic = true;
-                lambda_quad += dim.weight * dim.sense.sign();
+                lambda_quad += factor;
             }
             DimensionType::Linear { score_key } => {
                 // q += λ * sense * score_vector
                 let scores = universe.score_vector(score_key);
-                let factor = dim.weight * dim.sense.sign();
                 for (i, &s) in scores.iter().enumerate() {
                     q[i] += factor * s;
                 }
@@ -1025,6 +1049,7 @@ mod tests {
             fully_invested: true,
             tracking_error: None,
             cvar: None,
+            normalization: Default::default(),
         };
         let restrictions = Restrictions::default();
 

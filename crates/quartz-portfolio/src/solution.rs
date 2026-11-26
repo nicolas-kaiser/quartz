@@ -1,4 +1,6 @@
 use quartz_core::AssetId;
+
+use crate::normalization::DimensionRange;
 use std::collections::HashMap;
 
 pub use quartz_solver::SolveStatus;
@@ -15,7 +17,9 @@ pub struct PortfolioSolution {
     pub weights_vec: Vec<f64>,
     /// Portfolio-level scores for each dimension.
     pub portfolio_scores: HashMap<String, f64>,
-    /// Objective function value.
+    /// Objective function value: `Σ weight · sign · value` over the
+    /// dimensions, each value divided by its range when `dimension_ranges`
+    /// is not empty.
     pub objective_value: f64,
     /// Solve time in seconds.
     pub solve_time_s: f64,
@@ -26,6 +30,10 @@ pub struct PortfolioSolution {
     pub raw_x: Vec<f64>,
     /// Full dual vector (same sign convention on all backends).
     pub raw_z: Vec<f64>,
+    /// The feasible range each dimension was divided by, in strategy order.
+    /// Empty when the weights were applied raw (`Normalization::Raw`, fewer
+    /// than two weighted dimensions, or an infeasible problem).
+    pub dimension_ranges: Vec<DimensionRange>,
 }
 
 impl PortfolioSolution {

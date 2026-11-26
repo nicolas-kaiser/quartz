@@ -216,6 +216,27 @@ impl Strategy {
         slf
     }
 
+    /// How dimension weights are applied: "range" (default) divides each
+    /// dimension by its feasible range first, so weights are shares of a 0–1
+    /// trade-off whatever the units of the scores; "raw" weights the raw
+    /// values. Range costs one extra solve per weighted dimension.
+    fn normalization<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        mode: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let mode = match mode.to_ascii_lowercase().as_str() {
+            "range" => quartz_portfolio::Normalization::Range,
+            "raw" => quartz_portfolio::Normalization::Raw,
+            other => {
+                return Err(qerr(format!(
+                    "unknown normalization '{other}' (expected 'range' or 'raw')"
+                )))
+            }
+        };
+        slf.builder = slf.builder.clone().normalization(mode);
+        Ok(slf)
+    }
+
     /// Load a strategy from YAML text (dimension weights are normalized).
     #[staticmethod]
     fn from_yaml(text: &str) -> PyResult<Self> {

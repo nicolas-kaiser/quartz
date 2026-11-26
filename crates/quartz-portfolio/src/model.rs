@@ -5,16 +5,27 @@ use quartz_solver::{self, Backend, SolverSettings, WarmStart};
 
 use crate::compiler::{self, CompileError};
 use crate::constraints::{TransactionCosts, TurnoverConstraint};
+use crate::normalization::{self, DimensionRange};
 use crate::restriction::Restrictions;
-use crate::solution::PortfolioSolution;
-use crate::strategy::Strategy;
-use crate::tactic::Tactic;
+use crate::solution::{PortfolioSolution, SolveStatus};
+use crate::strategy::{Normalization, Strategy};
+use crate::tactic::{self, Tactic};
 
 /// Error from the portfolio model.
 #[derive(Debug)]
 pub enum PortfolioError {
     Compile(CompileError),
     Solver(quartz_solver::SolverError),
+    /// Range normalisation: the single-objective solve of `dimension` did not
+    /// reach an optimum (typically it is unbounded on its own), so the
+    /// dimension has no feasible range.
+    Normalization {
+        dimension: String,
+        status: SolveStatus,
+    },
+    /// Ranges passed to `PortfolioModel::dimension_ranges` do not match the
+    /// strategy's dimensions.
+    DimensionRangeMismatch { expected: usize, got: usize },
 }
 
 impl std::fmt::Display for PortfolioError {
@@ -22,6 +33,17 @@ impl std::fmt::Display for PortfolioError {
         match self {
             PortfolioError::Compile(e) => write!(f, "Compilation error: {e}"),
             PortfolioError::Solver(e) => write!(f, "Solver error: {e}"),
+            PortfolioError::Normalization { dimension, status } => write!(
+                f,
+                "Cannot normalise dimension '{dimension}': optimising it alone ended with \
+                 status {status:?}, so it has no feasible range. Bound the problem \
+                 (e.g. long-only or a maximum weight) or set the strategy's \
+                 normalization to raw"
+            ),
+            PortfolioError::DimensionRangeMismatch { expected, got } => write!(
+                f,
+                "Got {got} dimension ranges for a strategy with {expected} dimensions"
+            ),
         }
     }
 }
@@ -31,6 +53,7 @@ impl std::error::Error for PortfolioError {
         match self {
             PortfolioError::Compile(e) => Some(e),
             PortfolioError::Solver(e) => Some(e),
+            _ => None,
         }
     }
 }
@@ -66,6 +89,7 @@ pub struct PortfolioModel<'a> {
     solver_settings: SolverSettings,
     backend: Backend,
     warm_start: Option<WarmStart>,
+    dimension_ranges: Option<Vec<DimensionRange>>,
 }
 
 impl<'a> PortfolioModel<'a> {
@@ -81,6 +105,7 @@ impl<'a> PortfolioModel<'a> {
             solver_settings: SolverSettings::default(),
             backend: Backend::default(),
             warm_start: None,
+            dimension_ranges: None,
         }
     }
 
@@ -155,21 +180,112 @@ impl<'a> PortfolioModel<'a> {
         self
     }
 
+    /// Use these feasible ranges (one per dimension, strategy order) instead
+    /// of computing them. The ranges depend on the universe and the
+    /// constraints but not on the dimension weights, so one set serves every
+    /// re-solve that only changes weights. Ignored under
+    /// [`Normalization::Raw`].
+    #[must_use]
+    pub fn dimension_ranges(mut self, ranges: Vec<DimensionRange>) -> Self {
+        self.dimension_ranges = Some(ranges);
+        self
+    }
+
+    /// The feasible range of every dimension for this problem, including
+    /// dimensions at weight 0, whatever the strategy's normalisation.
+    /// `None` when there are fewer than two dimensions or the problem is
+    /// infeasible. Costs one solve per dimension.
+    pub fn compute_dimension_ranges(&self) -> Result<Option<Vec<DimensionRange>>, PortfolioError> {
+        let strategy = self.strategy.ok_or(PortfolioError::Compile(
+            CompileError::NoDimensions,
+        ))?;
+        let base = merged_strategy(strategy, self.tactic)?;
+        normalization::dimension_ranges(
+            self.universe,
+            &base,
+            &self.restrictions,
+            self.turnover.as_ref(),
+            self.transaction_costs.as_ref(),
+            &self.solver_settings,
+            self.backend,
+            true,
+        )
+    }
+
+    /// Compile to a QP. Under [`Normalization::Range`] this first measures
+    /// each dimension's feasible range (one extra solve per weighted
+    /// dimension, unless ranges were supplied) and divides by it.
+    fn compile(
+        &self,
+        strategy: &Strategy,
+    ) -> Result<(quartz_solver::CompiledProblem, Vec<DimensionRange>), PortfolioError> {
+        let raw = |strategy: &Strategy, tactic| {
+            compiler::compile_with_costs(
+                self.universe,
+                strategy,
+                tactic,
+                &self.restrictions,
+                self.turnover.as_ref(),
+                self.transaction_costs.as_ref(),
+            )
+        };
+        if strategy.normalization == Normalization::Raw {
+            return Ok((raw(strategy, self.tactic)?, Vec::new()));
+        }
+
+        // Fail on a malformed universe before any anchor solve does.
+        self.universe.validate().map_err(CompileError::from)?;
+        if strategy.dimensions.is_empty() {
+            return Err(CompileError::NoDimensions.into());
+        }
+
+        // Merge the tactic once: the ranges belong to the merged constraints,
+        // and the scales are indexed by the merged dimensions.
+        let base = merged_strategy(strategy, self.tactic)?;
+        let ranges = match &self.dimension_ranges {
+            Some(r) => {
+                if r.len() != base.dimensions.len() {
+                    return Err(PortfolioError::DimensionRangeMismatch {
+                        expected: base.dimensions.len(),
+                        got: r.len(),
+                    });
+                }
+                Some(r.clone())
+            }
+            None => normalization::dimension_ranges(
+                self.universe,
+                &base,
+                &self.restrictions,
+                self.turnover.as_ref(),
+                self.transaction_costs.as_ref(),
+                &self.solver_settings,
+                self.backend,
+                false,
+            )?,
+        };
+        let Some(ranges) = ranges else {
+            return Ok((raw(&base, None)?, Vec::new()));
+        };
+        let scales: Vec<f64> = ranges.iter().map(DimensionRange::scale).collect();
+        let problem = compiler::compile_scaled(
+            self.universe,
+            &base,
+            None,
+            &self.restrictions,
+            self.turnover.as_ref(),
+            self.transaction_costs.as_ref(),
+            Some(&scales),
+        )?;
+        Ok((problem, ranges))
+    }
+
     /// Compile, solve, and return the enriched portfolio solution.
     pub fn solve(self) -> Result<PortfolioSolution, PortfolioError> {
         let strategy = self.strategy.ok_or(PortfolioError::Compile(
             CompileError::NoDimensions,
         ))?;
 
-        // Compile to QP
-        let problem = compiler::compile_with_costs(
-            self.universe,
-            strategy,
-            self.tactic,
-            &self.restrictions,
-            self.turnover.as_ref(),
-            self.transaction_costs.as_ref(),
-        )?;
+        let (problem, dimension_ranges) = self.compile(strategy)?;
 
         let n = problem.n_assets;
 
@@ -247,8 +363,25 @@ impl<'a> PortfolioModel<'a> {
             iterations: raw.iterations,
             raw_x: raw.x,
             raw_z: raw.z,
+            dimension_ranges,
         })
     }
+}
+
+/// The strategy with the tactic merged in, as a plain raw-weighted `Strategy`
+/// (compile it with tactic `None`: merging twice would re-normalise weights).
+fn merged_strategy(strategy: &Strategy, tactic: Option<&Tactic>) -> Result<Strategy, PortfolioError> {
+    let merged = tactic::merge(strategy, tactic).map_err(CompileError::from)?;
+    Ok(Strategy {
+        name: strategy.name.clone(),
+        dimensions: merged.dimensions,
+        group_constraints: merged.group_constraints,
+        score_constraints: merged.score_constraints,
+        fully_invested: merged.fully_invested,
+        tracking_error: merged.tracking_error,
+        cvar: merged.cvar,
+        normalization: Normalization::Raw,
+    })
 }
 
 /// Exact discrete CVaR at level alpha: the mean loss over the worst (1−α)
@@ -878,5 +1011,304 @@ mod tests {
         assert!(err.source().is_some_and(|s| s.is::<CompileError>()));
         let inner = CompileError::InvalidUniverse(quartz_core::UniverseError::NoAssets);
         assert!(inner.source().is_some_and(|s| s.is::<quartz_core::UniverseError>()));
+    }
+
+    // ---- range normalisation -----------------------------------------------
+
+    /// The README universe; `esg_scale` multiplies `environmental_impact` and
+    /// `cov_scale` the covariance (a change of units, nothing else).
+    fn esg_universe(esg_scale: f64, cov_scale: f64) -> Universe {
+        let c = cov_scale;
+        Universe::builder()
+            .add_asset(
+                Asset::new("AAPL")
+                    .tag("currency", "USD")
+                    .score("expected_return", 0.10)
+                    .score("environmental_impact", 6.5 * esg_scale)
+                    .score("transition_risk", 3.0),
+            )
+            .add_asset(
+                Asset::new("NESN")
+                    .tag("currency", "CHF")
+                    .score("expected_return", 0.04)
+                    .score("environmental_impact", 8.0 * esg_scale)
+                    .score("transition_risk", 1.5),
+            )
+            .add_asset(
+                Asset::new("GREEN_BOND")
+                    .tag("currency", "EUR")
+                    .score("expected_return", 0.025)
+                    .score("environmental_impact", 9.5 * esg_scale)
+                    .score("transition_risk", 0.5),
+            )
+            .covariance_full(CscMatrix::from(&[
+                [0.04 * c, 0.002 * c, 0.001 * c],
+                [0.002 * c, 0.01 * c, 0.001 * c],
+                [0.001 * c, 0.001 * c, 0.003 * c],
+            ]))
+            .build()
+            .unwrap()
+    }
+
+    fn esg_strategy(normalization: Normalization) -> Strategy {
+        Strategy::builder("ESG Balanced")
+            .minimize_risk(0.40)
+            .maximize("expected_return", 0.25)
+            .minimize("transition_risk", 0.15)
+            .maximize("environmental_impact", 0.20)
+            .normalization(normalization)
+            .build()
+    }
+
+    fn esg_solve(universe: &Universe, normalization: Normalization) -> PortfolioSolution {
+        let strategy = esg_strategy(normalization);
+        let sol = PortfolioModel::new(universe)
+            .strategy(&strategy)
+            .restrictions(Restrictions::builder().long_only().fully_invested().build())
+            .solve()
+            .unwrap();
+        assert_eq!(sol.status, SolveStatus::Optimal);
+        sol
+    }
+
+    fn max_diff(a: &[f64], b: &[f64]) -> f64 {
+        a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn test_ranges_are_the_payoff_table() {
+        let universe = esg_universe(1.0, 1.0);
+        let sol = esg_solve(&universe, Normalization::Range);
+        let r = &sol.dimension_ranges;
+        assert_eq!(r.len(), 4);
+        let names: Vec<&str> = r.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["financial_risk", "expected_return", "transition_risk", "environmental_impact"]
+        );
+        // Long-only, fully invested: each score's best is a single asset,
+        // its worst the asset the opposite objective picks.
+        assert!((r[1].best - 0.10).abs() < 1e-6 && (r[1].worst - 0.025).abs() < 1e-6, "{r:?}");
+        assert!((r[2].best - 0.5).abs() < 1e-6 && (r[2].worst - 3.0).abs() < 1e-6, "{r:?}");
+        assert!((r[3].best - 9.5).abs() < 1e-6 && (r[3].worst - 6.5).abs() < 1e-6, "{r:?}");
+        // Variance: worst is all-AAPL (0.04), best the minimum-variance mix.
+        assert!((r[0].worst - 0.04).abs() < 1e-6, "{r:?}");
+        assert!(r[0].best > 0.0 && r[0].best < 0.003, "{r:?}");
+    }
+
+    #[test]
+    fn test_range_normalisation_gives_small_scale_dimensions_a_say() {
+        // 70% return against 30% ESG. Worst → best asset is 0.075 of return
+        // and 3.0 of ESG score.
+        let universe = esg_universe(1.0, 1.0);
+        let solve = |n| {
+            let strategy = Strategy::builder("S")
+                .maximize("expected_return", 0.7)
+                .maximize("environmental_impact", 0.3)
+                .normalization(n)
+                .build();
+            PortfolioModel::new(&universe)
+                .strategy(&strategy)
+                .restrictions(Restrictions::builder().long_only().fully_invested().build())
+                .solve()
+                .unwrap()
+        };
+        // Raw: 0.7·0.075 = 0.05 against 0.3·3.0 = 0.9, so ESG decides alone
+        // and everything goes to the bond.
+        let raw = solve(Normalization::Raw);
+        assert!(raw.dimension_ranges.is_empty());
+        assert!(raw.weights_vec[2] > 0.999, "{:?}", raw.weights_vec);
+        // Normalised: 0.7 against 0.3, so the high-return asset wins.
+        let ranged = solve(Normalization::Range);
+        assert!(ranged.weights_vec[0] > 0.999, "{:?}", ranged.weights_vec);
+    }
+
+    #[test]
+    fn test_range_normalisation_is_invariant_to_units() {
+        let base = esg_universe(1.0, 1.0);
+        let reference = esg_solve(&base, Normalization::Range).weights_vec;
+        // ESG on a 0–100 scale, and variance in percent² instead of decimals
+        for universe in [esg_universe(10.0, 1.0), esg_universe(1.0, 1e4)] {
+            let w = esg_solve(&universe, Normalization::Range).weights_vec;
+            assert!(max_diff(&w, &reference) < 1e-5, "{w:?} != {reference:?}");
+        }
+        // Raw weights do depend on the units of the covariance.
+        let raw_a = esg_solve(&base, Normalization::Raw).weights_vec;
+        let raw_b = esg_solve(&esg_universe(1.0, 1e4), Normalization::Raw).weights_vec;
+        assert!(max_diff(&raw_a, &raw_b) > 1e-2, "{raw_a:?} vs {raw_b:?}");
+    }
+
+    #[test]
+    fn test_objective_is_the_weighted_sum_of_normalised_scores() {
+        let universe = esg_universe(1.0, 1.0);
+        let strategy = esg_strategy(Normalization::Range);
+        let sol = esg_solve(&universe, Normalization::Range);
+        let expected: f64 = strategy
+            .dimensions
+            .iter()
+            .zip(&sol.dimension_ranges)
+            .map(|(d, r)| {
+                let value = sol.portfolio_scores[normalization::metric_key(d)];
+                d.weight * d.sense.sign() * value / r.scale()
+            })
+            .sum();
+        assert!((sol.objective_value - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_single_dimension_is_not_normalised() {
+        let universe = esg_universe(1.0, 1.0);
+        let restrictions = Restrictions::builder().long_only().fully_invested().build();
+        let solve = |n| {
+            let strategy = Strategy::builder("MinVar").minimize_risk(1.0).normalization(n).build();
+            PortfolioModel::new(&universe)
+                .strategy(&strategy)
+                .restrictions(restrictions.clone())
+                .solve()
+                .unwrap()
+        };
+        let ranged = solve(Normalization::Range);
+        assert!(ranged.dimension_ranges.is_empty());
+        assert_eq!(ranged.weights_vec, solve(Normalization::Raw).weights_vec);
+    }
+
+    #[test]
+    fn test_zero_weight_dimension_is_not_anchored() {
+        // An unbounded dimension at weight 0 must not break the solve.
+        let universe = esg_universe(1.0, 1.0);
+        let strategy = Strategy::builder("S")
+            .minimize_risk(0.5)
+            .minimize("transition_risk", 0.5)
+            .maximize("expected_return", 0.0)
+            .build();
+        let sol = PortfolioModel::new(&universe)
+            .strategy(&strategy)
+            .restrictions(Restrictions::builder().long_only().fully_invested().build())
+            .solve()
+            .unwrap();
+        assert_eq!(sol.status, SolveStatus::Optimal);
+        assert_eq!(sol.dimension_ranges.len(), 3);
+        assert_eq!(sol.dimension_ranges[2].scale(), 1.0);
+    }
+
+    #[test]
+    fn test_infeasible_problem_is_reported_not_an_error() {
+        let universe = esg_universe(1.0, 1.0);
+        let strategy = Strategy::builder("S")
+            .minimize_risk(0.5)
+            .maximize("expected_return", 0.5)
+            .score_min("environmental_impact", 20.0)
+            .build();
+        let sol = PortfolioModel::new(&universe)
+            .strategy(&strategy)
+            .restrictions(Restrictions::builder().long_only().fully_invested().build())
+            .solve()
+            .unwrap();
+        assert_eq!(sol.status, SolveStatus::Infeasible);
+        assert!(sol.dimension_ranges.is_empty());
+    }
+
+    #[test]
+    fn test_unbounded_dimension_is_a_normalisation_error() {
+        // Fully invested but shorting allowed: return alone has no optimum.
+        let universe = esg_universe(1.0, 1.0);
+        let restrictions = Restrictions::builder().fully_invested().build();
+        let solve = |n| {
+            let strategy = Strategy::builder("S")
+                .minimize_risk(0.5)
+                .maximize("expected_return", 0.5)
+                .normalization(n)
+                .build();
+            PortfolioModel::new(&universe)
+                .strategy(&strategy)
+                .restrictions(restrictions.clone())
+                .solve()
+        };
+        match solve(Normalization::Range) {
+            Err(PortfolioError::Normalization { dimension, .. }) => {
+                assert_eq!(dimension, "expected_return")
+            }
+            other => panic!("expected a normalisation error, got {other:?}"),
+        }
+        // The combined problem is bounded by the risk term: raw still solves.
+        assert_eq!(solve(Normalization::Raw).unwrap().status, SolveStatus::Optimal);
+    }
+
+    #[test]
+    fn test_constant_dimension_solves() {
+        // Identical scores: zero range, divisor 1, no NaN.
+        let universe = Universe::builder()
+            .add_asset(Asset::new("A").score("expected_return", 0.10).score("esg", 5.0))
+            .add_asset(Asset::new("B").score("expected_return", 0.02).score("esg", 5.0))
+            .covariance_full(CscMatrix::from(&[[0.04, 0.0], [0.0, 0.01]]))
+            .build()
+            .unwrap();
+        let strategy = Strategy::builder("S")
+            .minimize_risk(0.4)
+            .maximize("expected_return", 0.3)
+            .maximize("esg", 0.3)
+            .build();
+        let sol = PortfolioModel::new(&universe)
+            .strategy(&strategy)
+            .restrictions(Restrictions::builder().long_only().fully_invested().build())
+            .solve()
+            .unwrap();
+        assert_eq!(sol.status, SolveStatus::Optimal);
+        assert_eq!(sol.dimension_ranges[2].scale(), 1.0);
+        assert!(sol.weights_vec.iter().all(|w| w.is_finite()));
+    }
+
+    #[test]
+    fn test_supplied_ranges_replace_the_anchor_solves() {
+        let universe = esg_universe(1.0, 1.0);
+        let strategy = esg_strategy(Normalization::Range);
+        let restrictions = Restrictions::builder().long_only().fully_invested().build();
+        let model = || {
+            PortfolioModel::new(&universe)
+                .strategy(&strategy)
+                .restrictions(restrictions.clone())
+        };
+        let ranges = model().compute_dimension_ranges().unwrap().unwrap();
+        let direct = model().solve().unwrap();
+        assert_eq!(direct.dimension_ranges, ranges);
+        let supplied = model().dimension_ranges(ranges.clone()).solve().unwrap();
+        assert_eq!(supplied.weights_vec, direct.weights_vec);
+
+        let short = model().dimension_ranges(ranges[..2].to_vec()).solve();
+        assert!(matches!(
+            short,
+            Err(PortfolioError::DimensionRangeMismatch { expected: 4, got: 2 })
+        ));
+    }
+
+    #[test]
+    fn test_range_normalisation_with_tactic_factor_turnover_and_costs() {
+        let universe = factor_universe();
+        let strategy = Strategy::builder("S")
+            .minimize_risk(0.5)
+            .maximize("expected_return", 0.5)
+            .build();
+        let tactic = Tactic::builder("T").override_weight("financial_risk", 0.8).build();
+        let restrictions = Restrictions::builder().long_only().fully_invested().build();
+        let solve = |tactic: Option<&Tactic>| {
+            let mut model = PortfolioModel::new(&universe)
+                .strategy(&strategy)
+                .restrictions(restrictions.clone())
+                .turnover(PREV.to_vec(), 0.5)
+                .transaction_costs(vec![0.001; 3], "expected_return");
+            if let Some(t) = tactic {
+                model = model.tactic(t);
+            }
+            let sol = model.solve().unwrap();
+            assert_eq!(sol.status, SolveStatus::Optimal);
+            assert_eq!(sol.dimension_ranges.len(), 2);
+            sol
+        };
+        let base = solve(None);
+        let defensive = solve(Some(&tactic));
+        // More weight on risk: no more variance than before.
+        assert!(defensive.variance().unwrap() <= base.variance().unwrap() + 1e-9);
+        let turnover: f64 = base.weights_vec.iter().zip(&PREV).map(|(w, p)| (w - p).abs()).sum();
+        assert!(turnover <= 0.5 + 1e-6);
     }
 }

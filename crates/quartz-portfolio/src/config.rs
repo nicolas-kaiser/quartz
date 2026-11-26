@@ -338,4 +338,18 @@ tracking_error:
             Err(ConfigError::Json(_))
         ));
     }
+
+    #[test]
+    fn test_normalization_defaults_to_range_and_round_trips() {
+        use crate::strategy::Normalization;
+        let yaml = "name: S\ndimensions:\n- {name: financial_risk, type: quadratic, sense: minimize, weight: 1}\n";
+        let s = Strategy::from_yaml_str(yaml).unwrap();
+        assert_eq!(s.normalization, Normalization::Range);
+
+        let raw = Strategy::from_yaml_str(&format!("{yaml}normalization: raw\n")).unwrap();
+        assert_eq!(raw.normalization, Normalization::Raw);
+        assert!(raw.to_yaml_string().unwrap().contains("normalization: raw"));
+        let back = Strategy::from_json_str(&raw.to_json_string().unwrap()).unwrap();
+        assert_eq!(back.normalization, Normalization::Raw);
+    }
 }

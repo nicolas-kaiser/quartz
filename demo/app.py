@@ -110,6 +110,7 @@ def _build_strategy(sspec: dict):
         s = s.max_tracking_error(te["benchmark"], te["max_te"])
     if "cvar" in sspec:
         s = s.max_cvar(sspec["cvar"]["alpha"], sspec["cvar"]["max_cvar"])
+    s = s.normalization(sspec.get("normalization", "range"))
     # Fully-invested is controlled via restrictions in the demo spec.
     return s.fully_invested(False)
 
@@ -262,7 +263,17 @@ if use_factor:
 st.sidebar.header("Strategy")
 
 st.sidebar.subheader("Objective weights")
-st.sidebar.caption("Quartz normalizes the weights to sum to 1.")
+st.sidebar.caption(
+    "Quartz normalizes the weights to sum to 1 and, by default, divides each "
+    "objective by its feasible range, so a weight is a share of the trade-off "
+    "whatever the units of the score."
+)
+normalize_ranges = st.sidebar.checkbox(
+    "Range-normalize objectives",
+    value=True,
+    help="Off: weights multiply the raw values, so 0–10 scores swamp return "
+    "and variance. On needs a bounded problem (e.g. long-only).",
+)
 w_risk = st.sidebar.slider("Minimize financial risk (variance)", 0.0, 1.0, 0.40, 0.05)
 w_ret = st.sidebar.slider("Maximize expected return", 0.0, 1.0, 0.30, 0.05)
 w_env = st.sidebar.slider("Maximize environmental impact", 0.0, 1.0, 0.15, 0.05)
@@ -347,6 +358,7 @@ spec = {
         "dimensions": dimensions,
         "groups": group_constraints,
         "score_bounds": score_bounds,
+        "normalization": "range" if normalize_ranges else "raw",
     },
     "restrictions": {
         "long_only": long_only,

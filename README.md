@@ -96,6 +96,8 @@ let universe = quartz_core::Universe::builder()
 
 // A multi-dimensional strategy with risk limits
 let strategy = Strategy::builder("ESG Balanced")
+    // Weights are shares of each dimension's feasible range, so the units
+    // of a score (0–10, 0–100, decimals) do not change what 40% means.
     .minimize_risk(0.40)                          // 40% weight on variance
     .maximize("expected_return", 0.25)            // 25% on return
     .minimize("transition_risk", 0.15)            // 15% on climate risk
@@ -189,6 +191,7 @@ score_constraints:
   bound: !min 7.0       # or !max 3.0 / !range [4.0, 7.0]
 tracking_error: {benchmark_weights: [0.5, 0.5, 0.0], max_te: 0.05}
 cvar: {alpha: 0.95, max_cvar: 0.02}
+normalization: range    # default: weights apply to range-normalised dimensions; or raw
 ```
 
 ```rust
@@ -275,6 +278,8 @@ See [`demo/README.md`](demo/README.md) for details.
 ```
 
 What `P`, `q`, `A`, `b` and the cone list contain, row by row, and what the solver returns: [docs/compiler.md](docs/compiler.md).
+
+How dimension weights are made comparable across units (range normalisation, on by default): [docs/dimension-normalization.md](docs/dimension-normalization.md).
 
 ### Crate structure
 

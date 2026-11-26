@@ -1,6 +1,9 @@
 # A hand-authored Quartz strategy file.
 # Load with Strategy::load("....yaml") or quartz.Strategy.from_file(...) in Python.
 # Dimension weights are normalized to sum to 1 on load, so relative values work.
+# Each dimension is divided by its feasible range before its weight applies
+# (normalization: range, the default), so 40/30/30 means what it says whatever
+# the units of the scores. `normalization: raw` weights the raw values instead.
 name: ESG Balanced
 dimensions:
 - name: financial_risk
@@ -21,3 +24,4 @@ score_constraints:
 - score_key: environmental_impact
   bound: !min 7.0
 fully_invested: true
+normalization: range

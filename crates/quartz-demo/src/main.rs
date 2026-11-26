@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use quartz_core::{Asset, Dimension, Sense, Universe};
 use quartz_portfolio::solution::PortfolioSolution;
-use quartz_portfolio::{solve_batch, BatchProblem, FrontierExplorer, PortfolioModel, Restrictions, Strategy};
+use quartz_portfolio::{
+    solve_batch, BatchProblem, DimensionRange, FrontierExplorer, Normalization, PortfolioModel,
+    Restrictions, Strategy,
+};
 use quartz_solver::SolverSettings;
 
 #[derive(Deserialize)]
@@ -111,6 +114,9 @@ struct StrategySpec {
     tracking_error: Option<TrackingErrorSpec>,
     #[serde(default)]
     cvar: Option<CvarSpec>,
+    /// "range" (default) or "raw": how dimension weights are applied.
+    #[serde(default)]
+    normalization: Normalization,
 }
 
 #[derive(Deserialize)]
@@ -181,6 +187,8 @@ struct SolutionOutput {
     objective_value: f64,
     solve_time_s: f64,
     iterations: u32,
+    /// Feasible range each dimension was divided by (empty when raw).
+    dimension_ranges: Vec<DimensionRange>,
 }
 
 #[derive(Serialize)]
@@ -306,6 +314,7 @@ fn solution_output(universe: &Universe, solution: PortfolioSolution) -> Solution
         objective_value: solution.objective_value,
         solve_time_s: solution.solve_time_s,
         iterations: solution.iterations,
+        dimension_ranges: solution.dimension_ranges,
     }
 }
 
@@ -358,7 +367,10 @@ fn run(spec: ProblemSpec) -> Result<String, String> {
         sb = sb.max_cvar(cvar.alpha, cvar.max_cvar);
     }
     // Fully-invested is controlled via restrictions in the demo spec.
-    let strategy = sb.fully_invested(false).build();
+    let strategy = sb
+        .fully_invested(false)
+        .normalization(spec.strategy.normalization)
+        .build();
 
     // Restrictions
     let mut rb = Restrictions::builder();

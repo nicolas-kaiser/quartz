@@ -8,6 +8,11 @@ turns the solver's answer back into portfolio weights.
 This document describes exactly what goes in, what the five outputs
 `P`, `q`, `A`, `b` and the cone list contain, and what comes back.
 
+The compiler applies the dimension weights to the **raw** values. By default
+`PortfolioModel::solve` first measures each dimension's feasible range and
+divides the dimension's coefficient in `P` and `q` by it; nothing else in this
+document changes. See [dimension-normalization.md](dimension-normalization.md).
+
 ```
 Universe ─┐
 Strategy ─┤
@@ -137,6 +142,7 @@ of the score it reduces.
 | `fully_invested` | bool (builder and file default: `true`) | 1 equality row |
 | `tracking_error` | optional `{ benchmark_weights (n), max_te }` | 1 second-order cone |
 | `cvar` | optional `{ alpha, max_cvar }` | `1 + S` variables, `2S + 1` inequality rows |
+| `normalization` | `range` (default) or `raw` | nothing in `compile`; read by `PortfolioModel::solve` ([dimension-normalization.md](dimension-normalization.md)) |
 
 A dimension is either
 
@@ -247,6 +253,9 @@ Points to know:
   `P` are empty.
 - Without a quadratic dimension `P` is the all-zero matrix and the problem is a
   linear (or second-order cone) program.
+- Under range normalisation (`PortfolioModel::solve`, the default) each
+  quadratic dimension's `weight · sign` is divided by its range before it is
+  summed into `λ`.
 
 ---
 
@@ -262,6 +271,9 @@ Points to know:
 So a maximised score enters `q` with a minus sign (the solver minimises), a
 minimised one with a plus sign, and several dimensions simply add up. Entries for
 `y`, `ζ`, `u` are always 0.
+
+Under range normalisation (`PortfolioModel::solve`, the default) both values in
+the table are divided by the dimension's range.
 
 Example: `maximize("expected_return", 0.5)` with returns `[0.10, 0.05, 0.03]`
 gives `q = [−0.05, −0.025, −0.015]`.
@@ -466,7 +478,10 @@ let problem = compile(&universe, &strategy, None, &restrictions, None)?;
 ```
 
 No turnover, no factor model, no CVaR, so `x = [w_A, w_B, w_C]`, `n_aux = 0`.
-The compiled problem (values as produced by the code):
+The compiled problem (values as produced by the code; `compile` is raw, so
+these are the raw coefficients — `PortfolioModel::solve` would divide `P` and
+`q` by the ranges of risk and return unless the strategy says
+`normalization: raw`):
 
 ```
 P = ⎡0.040 0.006  0.002⎤      = 2 · 0.5 · Σ, upper triangle
@@ -496,7 +511,7 @@ cones = [ZeroConeT(1), NonnegativeConeT(5), SecondOrderConeT(4)]      1 + 5 + 4 
 Rows 7–9 of `A` are `Lᵀ` (`Σ = LLᵀ`; `0.2 = √0.04`) and their `b` entries are
 `Lᵀ · [0.4, 0.3, 0.3]`.
 
-Solver result (Clarabel):
+Solver result for this raw problem (Clarabel):
 
 ```
 status = Optimal
@@ -539,10 +554,11 @@ block `z` lies in the same cone. At the optimum `P x + q + Aᵀ z = 0`.
 | `weights` | `(AssetId, weight)` for every asset, in universe order — `x[0..n]` |
 | `weights_vec` | the same weights as a plain vector |
 | `portfolio_scores` | see below |
-| `objective_value` | `obj_val` — the scalarised objective `Σ weight · sign · metric` over the dimensions (variance for the risk dimension), less `weight · cᵀt` with transaction costs |
+| `objective_value` | `obj_val` — the scalarised objective `Σ weight · sign · metric` over the dimensions (variance for the risk dimension), less `weight · cᵀt` with transaction costs. With `dimension_ranges`, every term is divided by its dimension's range |
 | `solve_time_s`, `iterations` | copied |
 | `raw_x` | the full `x` including auxiliary variables |
 | `raw_z` | the full `z` |
+| `dimension_ranges` | `{ name, best, worst }` per dimension: the feasible range its coefficient was divided by. Empty when the weights were applied raw |
 
 `portfolio_scores` is computed after the solve from the weights, not read from
 the solver:
@@ -600,6 +616,11 @@ Checked before any matrix is built:
 | `InvalidTrackingErrorLimit` | `max_te` not finite or `≤ 0` |
 | `CholeskyFailure` | covariance not PSD (tracking error only) |
 
+`PortfolioModel::solve` adds two errors of its own (`PortfolioError`, not
+`CompileError`): `Normalization { dimension, status }` when a dimension has no
+feasible range because it is unbounded on its own, and
+`DimensionRangeMismatch` when supplied ranges do not match the dimensions.
+
 ---
 
 ## 13. Pitfalls
@@ -619,10 +640,13 @@ Things the compiler accepts without complaint:
 - **Maximising risk.** A quadratic dimension with `sense = Maximize` gives a
   negative `λ` and a `P` that is not PSD; the solver will fail or return
   nonsense.
-- **Weights are not always normalised.** Only the builder, the file loaders and
-  a tactic merge normalise dimension weights. They scale `P` and `q` directly, so
+- **Weights are not always normalised to sum to 1.** Only the builder, the file
+  loaders and a tactic merge do that. They scale `P` and `q` directly, so
   un-normalised weights change the objective value (not the optimum, if all are
   scaled alike).
+- **`compile` ignores `normalization`.** A problem compiled by hand weights the
+  raw values, so a 0–10 score outweighs a return or a variance. Solve through
+  `PortfolioModel` to get range-normalised weights.
 - **`t` is not the trade.** See section 6.2; compute `|w − w_prev|` yourself.
 
 ---
