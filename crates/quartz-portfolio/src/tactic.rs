@@ -576,6 +576,19 @@ mod tests {
     }
 
     #[test]
+    fn test_weight_override_with_only_zero_weight_dimensions_left() {
+        // The one dimension left alone has weight 0: nothing can take the other 40%.
+        let mut s = Strategy::builder("S").minimize_risk(1.0).maximize("ret", 1.0).build();
+        s.dimensions[0].weight = 1.0;
+        s.dimensions[1].weight = 0.0;
+        let t = Tactic::builder("T").override_weight("financial_risk", 0.6).build();
+        assert!(matches!(
+            merge(&s, Some(&t)),
+            Err(MergeError::WeightOverridesLeaveRemainder { total }) if (total - 0.6).abs() < 1e-12
+        ));
+    }
+
+    #[test]
     fn test_weight_override_errors() {
         let s = readme_strategy();
         let merge_with = |name: &str, w: f64| {

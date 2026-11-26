@@ -274,8 +274,9 @@ impl<'a> FrontierExplorer<'a> {
     /// Merge the tactic once up front and normalize dimension weights.
     ///
     /// Per-point solves must NOT pass the tactic through: `tactic::merge`
-    /// re-normalizes dimension weights and would silently distort the swept
-    /// weights. Group/score overrides are baked into the merged result here.
+    /// would re-apply the tactic's weight overrides (final shares) and reset
+    /// the swept weights. Group/score overrides are baked into the merged
+    /// result here.
     fn resolve_base(&self) -> Result<MergedStrategy, FrontierError> {
         let mut merged = tactic::merge(self.strategy, self.tactic)?;
         let total: f64 = merged.dimensions.iter().map(|d| d.weight).sum();

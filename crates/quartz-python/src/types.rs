@@ -371,7 +371,7 @@ impl Restrictions {
     }
 
     /// The exclusions that match no asset of `universe`, as
-    /// `("asset", id)` or `("tag", key, value)` tuples. An excluded id that is
+    /// `["asset", id]` or `["tag", key, value]` lists. An excluded id that is
     /// not in the universe is an error on solve unless
     /// `ignore_unknown_assets=True`.
     fn unmatched_exclusions(&self, universe: &Universe) -> Vec<Vec<String>> {

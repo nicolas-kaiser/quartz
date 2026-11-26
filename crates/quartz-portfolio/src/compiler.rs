@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use clarabel::algebra::CscMatrix;
 use clarabel::solver::SupportedConeT;
@@ -275,7 +275,10 @@ pub(crate) fn validate_references(
         Ok(())
     };
 
-    // Exclusions
+    // Exclusions. The folded-id lookup is built once, on the first unknown
+    // id: a firm-wide list can hold thousands of ids this universe lacks.
+    let mut folded_ids: Option<HashMap<String, &quartz_core::AssetId>> = None;
+    let mut seen_unknown: HashSet<&str> = HashSet::new();
     let mut unknown_ids: Vec<String> = Vec::new();
     for exclusion in &restrictions.exclusions {
         match exclusion {
@@ -284,17 +287,21 @@ pub(crate) fn validate_references(
                 if universe.asset_index(id).is_some() {
                     continue;
                 }
-                if let Some(existing) = universe
-                    .assets
-                    .iter()
-                    .find(|a| folded(a.id.as_str()) == folded(id.as_str()))
-                {
+                let by_folded = folded_ids.get_or_insert_with(|| {
+                    let mut map = HashMap::new();
+                    for a in &universe.assets {
+                        // first asset wins, in universe order
+                        map.entry(folded(a.id.as_str())).or_insert(&a.id);
+                    }
+                    map
+                });
+                if let Some(existing) = by_folded.get(&folded(id.as_str())) {
                     return Err(CompileError::ExcludedAssetNearMiss {
                         id: id.to_string(),
-                        existing: existing.id.to_string(),
+                        existing: existing.to_string(),
                     });
                 }
-                if !unknown_ids.contains(&id.0) {
+                if seen_unknown.insert(id.0.as_str()) {
                     unknown_ids.push(id.0.clone());
                 }
             }

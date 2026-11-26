@@ -378,7 +378,7 @@ impl<'a> PortfolioModel<'a> {
 }
 
 /// The strategy with the tactic merged in, as a plain raw-weighted `Strategy`
-/// (compile it with tactic `None`: merging twice would re-normalise weights).
+/// (compile it with tactic `None`: the overrides are already applied).
 fn merged_strategy(strategy: &Strategy, tactic: Option<&Tactic>) -> Result<Strategy, PortfolioError> {
     let merged = tactic::merge(strategy, tactic).map_err(CompileError::from)?;
     Ok(Strategy {
@@ -1324,9 +1324,9 @@ mod tests {
     // ---- names that match nothing ------------------------------------------
 
     #[test]
-    fn test_typo_in_score_key_fails_before_the_anchor_solves() {
-        // Under range normalisation the error must be the compile error, not
-        // a Normalization error from an anchor of the phantom dimension.
+    fn test_typo_in_score_key_is_a_compile_error_under_range_normalisation() {
+        // The error is the compile error, not a Normalization error from an
+        // anchor solve of the phantom dimension.
         let universe = esg_universe(1.0, 1.0);
         let strategy = Strategy::builder("S")
             .minimize_risk(0.4)

@@ -81,9 +81,9 @@ sum.
 
 ## Where the errors surface
 
-`compile` and `PortfolioModel::solve` return them as
-`CompileError::MergeError`, the frontier explorer as `FrontierError::Merge`,
-the Python bindings as `QuartzError`.
+`compile` returns them as `CompileError::MergeError`, `PortfolioModel::solve`
+as `PortfolioError::Compile(CompileError::MergeError(..))`, the frontier
+explorer as `FrontierError::Merge`, the Python bindings as `QuartzError`.
 
 ## Change of behaviour
 
