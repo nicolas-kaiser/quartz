@@ -43,6 +43,19 @@ pub struct Solution {
     /// Full dual vector (same sign convention on all backends).
     #[pyo3(get)]
     pub raw_z: Vec<f64>,
+    dimension_ranges: Vec<quartz_portfolio::DimensionRange>,
+}
+
+/// Ranges as an ordered dict {dimension name: (best, worst)}.
+fn ranges_dict<'py>(
+    py: Python<'py>,
+    ranges: &[quartz_portfolio::DimensionRange],
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    for r in ranges {
+        d.set_item(&r.name, (r.best, r.worst))?;
+    }
+    Ok(d)
 }
 
 impl Solution {
@@ -61,6 +74,7 @@ impl Solution {
             iterations: sol.iterations,
             raw_x: sol.raw_x,
             raw_z: sol.raw_z,
+            dimension_ranges: sol.dimension_ranges,
         }
     }
 }
@@ -75,6 +89,14 @@ impl Solution {
             d.set_item(id, w)?;
         }
         Ok(d)
+    }
+
+    /// The feasible range each dimension was divided by before its weight
+    /// applied: {dimension name: (best, worst)}. Empty when the weights were
+    /// applied raw.
+    #[getter]
+    fn dimension_ranges<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        ranges_dict(py, &self.dimension_ranges)
     }
 
     #[getter]
@@ -308,6 +330,7 @@ pub struct Frontier {
     #[pyo3(get)]
     pub n_skipped: usize,
     points: Vec<Py<FrontierPoint>>,
+    dimension_ranges: Vec<quartz_portfolio::DimensionRange>,
 }
 
 #[pymethods]
@@ -315,6 +338,13 @@ impl Frontier {
     #[getter]
     fn points(&self, py: Python<'_>) -> Vec<Py<FrontierPoint>> {
         self.points.iter().map(|p| p.clone_ref(py)).collect()
+    }
+
+    /// The feasible ranges shared by every point: {dimension name: (best,
+    /// worst)}. Empty when the weights were applied raw.
+    #[getter]
+    fn dimension_ranges<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        ranges_dict(py, &self.dimension_ranges)
     }
 
     fn __len__(&self) -> usize {
@@ -351,6 +381,7 @@ fn frontier_from_rust(
         objective_dims: result.objective_dims,
         n_skipped: result.n_skipped,
         points,
+        dimension_ranges: result.dimension_ranges,
     })
 }
 

@@ -22,6 +22,7 @@ pub enum ScoreBound {
 /// Example: ScoreConstraint::new("environmental_impact", ScoreBound::Min(5.0))
 /// means Σᵢ(wᵢ * enviro_scoreᵢ) ≥ 5.0.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScoreConstraint {
     pub score_key: String,
     pub bound: ScoreBound,

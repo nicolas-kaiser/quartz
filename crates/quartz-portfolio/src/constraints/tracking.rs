@@ -17,6 +17,7 @@ use super::{ConstraintContribution, Triplet};
 use crate::math::{cholesky_lower, csc_to_dense, CholeskyError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrackingErrorConstraint {
     /// Benchmark weights, ordered by universe index (length n).
     pub benchmark_weights: Vec<f64>,

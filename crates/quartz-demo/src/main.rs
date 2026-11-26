@@ -12,10 +12,14 @@ use serde::{Deserialize, Serialize};
 
 use quartz_core::{Asset, Dimension, Sense, Universe};
 use quartz_portfolio::solution::PortfolioSolution;
-use quartz_portfolio::{solve_batch, BatchProblem, FrontierExplorer, PortfolioModel, Restrictions, Strategy};
+use quartz_portfolio::{
+    solve_batch, BatchProblem, DimensionRange, FrontierExplorer, Normalization, PortfolioModel,
+    Restrictions, Strategy,
+};
 use quartz_solver::SolverSettings;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProblemSpec {
     assets: Vec<AssetSpec>,
     /// Dense n×n covariance matrix, row-major. Exactly one of `covariance`
@@ -40,12 +44,14 @@ struct ProblemSpec {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BatchSpec {
     items: Vec<BatchItemSpec>,
 }
 
 /// Per-item overrides applied on top of the shared spec-level assets.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BatchItemSpec {
     /// Item covariance; falls back to the spec-level covariance if omitted.
     #[serde(default)]
@@ -63,6 +69,7 @@ struct BatchItemSpec {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FrontierSpec {
     /// "sweep" (two dimensions) or "grid" (simplex lattice over all dimensions).
     mode: String,
@@ -81,6 +88,7 @@ struct FrontierSpec {
 
 /// Factor covariance model Σ = BFBᵀ + D.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FactorModelSpec {
     /// Dense n×k loadings B, row-major.
     loadings: Vec<Vec<f64>>,
@@ -91,6 +99,7 @@ struct FactorModelSpec {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AssetSpec {
     id: String,
     #[serde(default)]
@@ -100,6 +109,7 @@ struct AssetSpec {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StrategySpec {
     name: String,
     dimensions: Vec<DimensionSpec>,
@@ -111,9 +121,13 @@ struct StrategySpec {
     tracking_error: Option<TrackingErrorSpec>,
     #[serde(default)]
     cvar: Option<CvarSpec>,
+    /// "range" (default) or "raw": how dimension weights are applied.
+    #[serde(default)]
+    normalization: Normalization,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TrackingErrorSpec {
     /// Benchmark weights, ordered like `assets`.
     benchmark: Vec<f64>,
@@ -121,12 +135,14 @@ struct TrackingErrorSpec {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CvarSpec {
     alpha: f64,
     max_cvar: f64,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DimensionSpec {
     /// "risk" for the quadratic variance dimension, "linear" for score-based.
     kind: String,
@@ -138,6 +154,7 @@ struct DimensionSpec {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GroupSpec {
     tag_key: String,
     tag_value: String,
@@ -146,6 +163,7 @@ struct GroupSpec {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ScoreBoundSpec {
     score_key: String,
     /// "min" or "max".
@@ -154,6 +172,7 @@ struct ScoreBoundSpec {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RestrictionsSpec {
     #[serde(default)]
     long_only: bool,
@@ -165,9 +184,13 @@ struct RestrictionsSpec {
     exclude_assets: Vec<String>,
     #[serde(default)]
     exclude_tags: Vec<(String, String)>,
+    /// Accept excluded asset ids that are not in the universe.
+    #[serde(default)]
+    ignore_unknown_assets: bool,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TurnoverSpec {
     previous_weights: Vec<f64>,
     max_turnover: f64,
@@ -181,6 +204,8 @@ struct SolutionOutput {
     objective_value: f64,
     solve_time_s: f64,
     iterations: u32,
+    /// Feasible range each dimension was divided by (empty when raw).
+    dimension_ranges: Vec<DimensionRange>,
 }
 
 #[derive(Serialize)]
@@ -306,6 +331,7 @@ fn solution_output(universe: &Universe, solution: PortfolioSolution) -> Solution
         objective_value: solution.objective_value,
         solve_time_s: solution.solve_time_s,
         iterations: solution.iterations,
+        dimension_ranges: solution.dimension_ranges,
     }
 }
 
@@ -358,7 +384,10 @@ fn run(spec: ProblemSpec) -> Result<String, String> {
         sb = sb.max_cvar(cvar.alpha, cvar.max_cvar);
     }
     // Fully-invested is controlled via restrictions in the demo spec.
-    let strategy = sb.fully_invested(false).build();
+    let strategy = sb
+        .fully_invested(false)
+        .normalization(spec.strategy.normalization)
+        .build();
 
     // Restrictions
     let mut rb = Restrictions::builder();
@@ -370,6 +399,9 @@ fn run(spec: ProblemSpec) -> Result<String, String> {
     }
     if let Some(max_w) = spec.restrictions.max_single_weight {
         rb = rb.max_single_weight(max_w);
+    }
+    if spec.restrictions.ignore_unknown_assets {
+        rb = rb.ignore_unknown_assets();
     }
     for id in &spec.restrictions.exclude_assets {
         rb = rb.exclude_asset(id.as_str());
@@ -506,5 +538,66 @@ fn main() {
             println!("{}", serde_json::json!({ "error": e }));
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SPEC: &str = r#"{
+        "assets": [
+            {"id": "A", "tags": {"currency": "USD"}, "scores": {"expected_return": 0.10}},
+            {"id": "B", "tags": {"currency": "EUR"}, "scores": {"expected_return": 0.05}}
+        ],
+        "covariance": [[0.04, 0.0], [0.0, 0.01]],
+        "strategy": {
+            "name": "S",
+            "dimensions": [
+                {"kind": "risk", "sense": "minimize", "weight": 0.5},
+                {"kind": "linear", "score_key": "expected_return", "sense": "maximize", "weight": 0.5}
+            ]
+        },
+        "restrictions": {"long_only": true, "fully_invested": true}
+    }"#;
+
+    fn parse(spec: &str) -> Result<ProblemSpec, String> {
+        serde_json::from_str(spec).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn test_valid_spec_solves() {
+        let out = run(parse(SPEC).unwrap()).unwrap();
+        assert!(out.contains("\"status\": \"Optimal\"") || out.contains("\"status\":\"Optimal\""), "{out}");
+    }
+
+    #[test]
+    fn test_misspelt_keys_are_rejected() {
+        // top level, strategy, restrictions, dimension
+        for (from, to) in [
+            ("\"restrictions\"", "\"restriction\""),
+            ("\"dimensions\"", "\"dimensions\": [], \"dimensons\""),
+            ("\"long_only\"", "\"exclude_asset\": [\"A\"], \"long_only\""),
+            ("\"weight\": 0.5}\n", "\"weight\": 0.5, \"wieght\": 1}\n"),
+        ] {
+            let spec = SPEC.replacen(from, to, 1);
+            assert_ne!(spec, SPEC, "{from}");
+            let err = parse(&spec).err().unwrap_or_else(|| panic!("accepted: {to}"));
+            assert!(err.contains("unknown field"), "{err}");
+        }
+    }
+
+    #[test]
+    fn test_unknown_names_are_errors_not_noops() {
+        let typo = SPEC.replacen("\"score_key\": \"expected_return\"", "\"score_key\": \"expected_retrun\"", 1);
+        let err = run(parse(&typo).unwrap()).unwrap_err();
+        assert!(err.contains("expected_retrun") && err.contains("expected_return"), "{err}");
+
+        let excl = SPEC.replacen("\"long_only\": true", "\"long_only\": true, \"exclude_assets\": [\"C\"]", 1);
+        let err = run(parse(&excl).unwrap()).unwrap_err();
+        assert!(err.contains("'C'") || err.contains(": C"), "{err}");
+
+        let ok = excl.replacen("\"long_only\": true", "\"long_only\": true, \"ignore_unknown_assets\": true", 1);
+        assert!(run(parse(&ok).unwrap()).is_ok());
     }
 }

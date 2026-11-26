@@ -41,7 +41,11 @@ pub enum DimensionType {
 ///
 /// In a multi-dimensional portfolio optimization, each dimension represents
 /// something to optimize: financial risk, expected return, ESG scores, etc.
+///
+/// Deserialization goes through [`DimensionRepr`] so that a misspelt key
+/// (`wieght`) is an error; `flatten` alone would ignore it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "DimensionRepr")]
 pub struct Dimension {
     /// Human-readable name for this dimension.
     pub name: String,
@@ -52,6 +56,58 @@ pub struct Dimension {
     pub sense: Sense,
     /// Weight (λ) in the scalarized multi-objective function.
     pub weight: f64,
+}
+
+/// The kind tag of a dimension on the wire.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DimensionKind {
+    Linear,
+    Quadratic,
+}
+
+/// Strict wire shape of a [`Dimension`]: the same keys the serializer writes,
+/// and no others.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DimensionRepr {
+    name: String,
+    #[serde(rename = "type")]
+    kind: DimensionKind,
+    #[serde(default)]
+    score_key: Option<String>,
+    sense: Sense,
+    weight: f64,
+}
+
+impl TryFrom<DimensionRepr> for Dimension {
+    type Error = String;
+
+    fn try_from(r: DimensionRepr) -> Result<Self, String> {
+        let dim_type = match (r.kind, r.score_key) {
+            (DimensionKind::Linear, Some(score_key)) => DimensionType::Linear { score_key },
+            (DimensionKind::Linear, None) => {
+                return Err(format!(
+                    "dimension '{}': type linear needs a score_key",
+                    r.name
+                ))
+            }
+            (DimensionKind::Quadratic, None) => DimensionType::Quadratic,
+            (DimensionKind::Quadratic, Some(key)) => {
+                return Err(format!(
+                    "dimension '{}': type quadratic is the portfolio variance and takes no \
+                     score_key (got '{key}'); use type linear to optimise a score",
+                    r.name
+                ))
+            }
+        };
+        Ok(Dimension {
+            name: r.name,
+            dim_type,
+            sense: r.sense,
+            weight: r.weight,
+        })
+    }
 }
 
 impl Dimension {

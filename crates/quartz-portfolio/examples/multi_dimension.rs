@@ -147,4 +147,11 @@ fn print_solution(solution: &quartz_portfolio::PortfolioSolution) {
     for (key, val) in scores {
         println!("  {:25} {:.4}", key, val);
     }
+    if !solution.dimension_ranges.is_empty() {
+        // What each dimension weight was measured against
+        println!("\nFeasible ranges (best … worst):");
+        for r in &solution.dimension_ranges {
+            println!("  {:25} {:.4} … {:.4}", r.name, r.best, r.worst);
+        }
+    }
 }

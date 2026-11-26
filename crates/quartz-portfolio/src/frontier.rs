@@ -11,12 +11,13 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use quartz_core::{AssetId, Dimension, DimensionType, Universe};
+use quartz_core::{AssetId, Dimension, Universe};
 
 use crate::model::{PortfolioError, PortfolioModel};
+use crate::normalization::{metric_key, DimensionRange};
 use crate::restriction::Restrictions;
 use crate::solution::SolveStatus;
-use crate::strategy::Strategy;
+use crate::strategy::{Normalization, Strategy};
 use crate::tactic::{self, MergeError, MergedStrategy, Tactic};
 
 /// Hard cap on the number of solves per exploration.
@@ -114,6 +115,10 @@ pub struct FrontierResult {
     pub objective_dims: Vec<String>,
     /// Number of explored points skipped because the solve was not optimal.
     pub n_skipped: usize,
+    /// The feasible range every dimension was divided by at every point
+    /// (strategy order). Empty when the weights were applied raw.
+    #[serde(default)]
+    pub dimension_ranges: Vec<DimensionRange>,
 }
 
 /// Explores the Pareto frontier of a multi-dimensional strategy.
@@ -202,6 +207,7 @@ impl<'a> FrontierExplorer<'a> {
                 dim_b: dim_b.to_string(),
             });
         }
+        let ranges = self.resolve_ranges(&base)?;
 
         let weight_sets: Vec<Vec<Dimension>> = (0..n_points)
             .map(|i| {
@@ -213,7 +219,7 @@ impl<'a> FrontierExplorer<'a> {
             })
             .collect();
         let solved = crate::par::par_map(&weight_sets, |dims| {
-            self.solve_point(&base, dims.clone())
+            self.solve_point(&base, &ranges, dims.clone())
         });
         let (points, n_skipped) = collect_points(solved)?;
 
@@ -221,7 +227,7 @@ impl<'a> FrontierExplorer<'a> {
             base.dimensions[ia].clone(),
             base.dimensions[ib].clone(),
         ];
-        finish(points, &objective_dims, n_skipped, n_points)
+        finish(points, &objective_dims, n_skipped, n_points, ranges)
     }
 
     /// Enumerate all weight combinations on a simplex lattice over every
@@ -245,6 +251,7 @@ impl<'a> FrontierExplorer<'a> {
                 max: MAX_POINTS,
             });
         }
+        let ranges = self.resolve_ranges(&base)?;
 
         let weight_sets: Vec<Vec<Dimension>> = compositions(resolution, m)
             .into_iter()
@@ -257,18 +264,19 @@ impl<'a> FrontierExplorer<'a> {
             })
             .collect();
         let solved = crate::par::par_map(&weight_sets, |dims| {
-            self.solve_point(&base, dims.clone())
+            self.solve_point(&base, &ranges, dims.clone())
         });
         let (points, n_skipped) = collect_points(solved)?;
 
-        finish(points, &base.dimensions, n_skipped, n_points)
+        finish(points, &base.dimensions, n_skipped, n_points, ranges)
     }
 
     /// Merge the tactic once up front and normalize dimension weights.
     ///
     /// Per-point solves must NOT pass the tactic through: `tactic::merge`
-    /// re-normalizes dimension weights and would silently distort the swept
-    /// weights. Group/score overrides are baked into the merged result here.
+    /// would re-apply the tactic's weight overrides (final shares) and reset
+    /// the swept weights. Group/score overrides are baked into the merged
+    /// result here.
     fn resolve_base(&self) -> Result<MergedStrategy, FrontierError> {
         let mut merged = tactic::merge(self.strategy, self.tactic)?;
         let total: f64 = merged.dimensions.iter().map(|d| d.weight).sum();
@@ -280,13 +288,28 @@ impl<'a> FrontierExplorer<'a> {
         Ok(merged)
     }
 
-    /// Solve one weight combination. Returns Ok(None) for non-optimal statuses.
-    fn solve_point(
+    /// Under range normalisation, measure the feasible ranges once for all
+    /// dimensions: they do not depend on the weights, so every point shares
+    /// them (and the points stay comparable). `None` means the points are
+    /// solved raw.
+    fn resolve_ranges(
+        &self,
+        base: &MergedStrategy,
+    ) -> Result<Option<Vec<DimensionRange>>, FrontierError> {
+        if self.strategy.normalization == Normalization::Raw {
+            return Ok(None);
+        }
+        let strategy = self.point_strategy(base, base.dimensions.clone(), Normalization::Raw);
+        Ok(self.model(&strategy).compute_dimension_ranges()?)
+    }
+
+    fn point_strategy(
         &self,
         base: &MergedStrategy,
         dims: Vec<Dimension>,
-    ) -> Result<Option<FrontierPoint>, FrontierError> {
-        let strategy = Strategy {
+        normalization: Normalization,
+    ) -> Strategy {
+        Strategy {
             name: self.strategy.name.clone(),
             dimensions: dims,
             group_constraints: base.group_constraints.clone(),
@@ -294,15 +317,41 @@ impl<'a> FrontierExplorer<'a> {
             fully_invested: base.fully_invested,
             tracking_error: base.tracking_error.clone(),
             cvar: base.cvar.clone(),
-        };
+            normalization,
+        }
+    }
+
+    /// A model over `strategy` with this explorer's constraints.
+    fn model<'s>(&'s self, strategy: &'s Strategy) -> PortfolioModel<'s> {
         let mut model = PortfolioModel::new(self.universe)
-            .strategy(&strategy)
+            .strategy(strategy)
             .restrictions(self.restrictions.clone());
         if let Some((prev, max)) = &self.turnover {
             model = model.turnover(prev.clone(), *max);
         }
         if let Some((rates, key)) = &self.transaction_costs {
             model = model.transaction_costs(rates.clone(), key.clone());
+        }
+        model
+    }
+
+    /// Solve one weight combination. Returns Ok(None) for non-optimal statuses.
+    fn solve_point(
+        &self,
+        base: &MergedStrategy,
+        ranges: &Option<Vec<DimensionRange>>,
+        dims: Vec<Dimension>,
+    ) -> Result<Option<FrontierPoint>, FrontierError> {
+        // Without ranges the point is solved raw (also when the problem is
+        // infeasible: no point in re-measuring the ranges at every point).
+        let normalization = match ranges {
+            Some(_) => Normalization::Range,
+            None => Normalization::Raw,
+        };
+        let strategy = self.point_strategy(base, dims, normalization);
+        let mut model = self.model(&strategy);
+        if let Some(r) = ranges {
+            model = model.dimension_ranges(r.clone());
         }
         let sol = model.solve()?;
         if sol.status != SolveStatus::Optimal {
@@ -320,14 +369,6 @@ impl<'a> FrontierExplorer<'a> {
             objective_value: sol.objective_value,
             is_efficient: false,
         }))
-    }
-}
-
-/// The portfolio_scores key a dimension is measured by.
-fn metric_key(dim: &Dimension) -> &str {
-    match &dim.dim_type {
-        DimensionType::Quadratic => "financial_risk",
-        DimensionType::Linear { score_key } => score_key,
     }
 }
 
@@ -362,6 +403,7 @@ fn finish(
     objective_dims: &[Dimension],
     n_skipped: usize,
     attempted: usize,
+    ranges: Option<Vec<DimensionRange>>,
 ) -> Result<FrontierResult, FrontierError> {
     if points.is_empty() {
         return Err(FrontierError::NoFeasiblePoints { attempted });
@@ -388,6 +430,7 @@ fn finish(
         points,
         objective_dims: objective_dims.iter().map(|d| d.name.clone()).collect(),
         n_skipped,
+        dimension_ranges: ranges.unwrap_or_default(),
     })
 }
 
@@ -642,6 +685,7 @@ mod tests {
             fully_invested: true,
             tracking_error: None,
             cvar: None,
+            normalization: Default::default(),
         };
         let normalized = base_strategy();
 
@@ -685,6 +729,70 @@ mod tests {
             for (wt, wn) in pt.weights_vec.iter().zip(&pn.weights_vec) {
                 assert!((wt - wn).abs() < 1e-6);
             }
+        }
+    }
+
+    #[test]
+    fn test_ranges_are_measured_once_and_shared() {
+        let universe = two_asset_universe();
+        let strategy = base_strategy();
+        let result = FrontierExplorer::new(&universe, &strategy)
+            .restrictions(base_restrictions())
+            .sweep("expected_return", "financial_risk", 5)
+            .unwrap();
+        // risk: best 0.008 (x = 0.2), worst 0.04 (all A); return: 0.10 … 0.036
+        let r = &result.dimension_ranges;
+        assert_eq!(r.len(), 2);
+        assert!((r[0].best - 0.008).abs() < 1e-6 && (r[0].worst - 0.04).abs() < 1e-6, "{r:?}");
+        assert!((r[1].best - 0.10).abs() < 1e-6 && (r[1].worst - 0.036).abs() < 1e-6, "{r:?}");
+
+        // The base strategy (alpha = 0.5) lies on the sweep with the same solution.
+        let direct = PortfolioModel::new(&universe)
+            .strategy(&strategy)
+            .restrictions(base_restrictions())
+            .solve()
+            .unwrap();
+        for (a, b) in result.points[2].weights_vec.iter().zip(&direct.weights_vec) {
+            assert!((a - b).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_raw_strategy_sweeps_raw() {
+        let universe = two_asset_universe();
+        let strategy = Strategy::builder("Raw")
+            .minimize_risk(0.5)
+            .maximize("expected_return", 0.5)
+            .normalization(Normalization::Raw)
+            .build();
+        // No restrictions: return alone is unbounded, which only raw accepts.
+        let result = FrontierExplorer::new(&universe, &strategy)
+            .sweep("financial_risk", "expected_return", 3)
+            .unwrap();
+        assert!(result.dimension_ranges.is_empty());
+    }
+
+    #[test]
+    fn test_sweep_over_a_dimension_with_an_unknown_score_key_is_an_error() {
+        // Used to return a frontier with one constant axis.
+        let universe = two_asset_universe();
+        let strategy = Strategy::builder("S").minimize_risk(0.5).maximize("esgg", 0.5).build();
+        for normalization in [Normalization::Range, Normalization::Raw] {
+            let mut s = strategy.clone();
+            s.normalization = normalization;
+            let result = FrontierExplorer::new(&universe, &s)
+                .restrictions(base_restrictions())
+                .sweep("esgg", "financial_risk", 5);
+            assert!(
+                matches!(
+                    result,
+                    Err(FrontierError::Portfolio(PortfolioError::Compile(
+                        crate::compiler::CompileError::UnknownScoreKey { .. }
+                    )))
+                ),
+                "{normalization:?}: {:?}",
+                result.map(|_| ())
+            );
         }
     }
 }

@@ -338,4 +338,103 @@ tracking_error:
             Err(ConfigError::Json(_))
         ));
     }
+
+    #[test]
+    fn test_normalization_defaults_to_range_and_round_trips() {
+        use crate::strategy::Normalization;
+        let yaml = "name: S\ndimensions:\n- {name: financial_risk, type: quadratic, sense: minimize, weight: 1}\n";
+        let s = Strategy::from_yaml_str(yaml).unwrap();
+        assert_eq!(s.normalization, Normalization::Range);
+
+        let raw = Strategy::from_yaml_str(&format!("{yaml}normalization: raw\n")).unwrap();
+        assert_eq!(raw.normalization, Normalization::Raw);
+        assert!(raw.to_yaml_string().unwrap().contains("normalization: raw"));
+        let back = Strategy::from_json_str(&raw.to_json_string().unwrap()).unwrap();
+        assert_eq!(back.normalization, Normalization::Raw);
+    }
+
+    // ---- unknown keys --------------------------------------------------------
+
+    fn assert_unknown_field<T: std::fmt::Debug>(result: Result<T, ConfigError>, field: &str) {
+        let msg = result.expect_err("a misspelt key must not load").to_string();
+        assert!(msg.contains("unknown field") && msg.contains(field), "{msg}");
+    }
+
+    const STRATEGY: &str = "\
+name: S
+dimensions:
+- {name: financial_risk, type: quadratic, sense: minimize, weight: 1}
+";
+
+    #[test]
+    fn test_strategy_file_rejects_unknown_keys() {
+        assert!(Strategy::from_yaml_str(STRATEGY).is_ok());
+        // a misspelt section used to load as "no score constraints"
+        let yaml = format!("{STRATEGY}score_constrains:\n- {{score_key: esg, bound: !min 5.0}}\n");
+        assert_unknown_field(Strategy::from_yaml_str(&yaml), "score_constrains");
+        // inside a group and a score constraint
+        let yaml = format!(
+            "{STRATEGY}group_constraints:\n- {{tag_key: currency, tag_value: EUR, lower: 0.1, uper: 0.5}}\n"
+        );
+        assert_unknown_field(Strategy::from_yaml_str(&yaml), "uper");
+        let yaml = format!("{STRATEGY}score_constraints:\n- {{score_key: esg, bound: !min 5.0, hard: true}}\n");
+        assert_unknown_field(Strategy::from_yaml_str(&yaml), "hard");
+        let yaml = format!("{STRATEGY}cvar: {{alpha: 0.95, max_cvar: 0.02, horizon: 10}}\n");
+        assert_unknown_field(Strategy::from_yaml_str(&yaml), "horizon");
+        // JSON goes through the same types
+        let json = r#"{"name": "S", "dimensions": [], "fully_investd": false}"#;
+        assert_unknown_field(Strategy::from_json_str(json), "fully_investd");
+    }
+
+    #[test]
+    fn test_dimension_rejects_unknown_and_inconsistent_keys() {
+        let dims = |d: &str| Strategy::from_yaml_str(&format!("name: S\ndimensions:\n- {d}\n"));
+        // the misspelt weight used to be ignored (and the real one was then missing)
+        assert_unknown_field(
+            dims("{name: r, type: quadratic, sense: minimize, weight: 1, wieght: 2}"),
+            "wieght",
+        );
+        let msg = dims("{name: r, type: quadratic, score_key: esg, sense: minimize, weight: 1}")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("takes no") && msg.contains("score_key"), "{msg}");
+        let msg = dims("{name: r, type: linear, sense: maximize, weight: 1}")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("needs a score_key"), "{msg}");
+        // capitalised sense is still accepted
+        assert!(dims("{name: r, type: linear, score_key: esg, sense: Maximize, weight: 1}").is_ok());
+    }
+
+    #[test]
+    fn test_tactic_file_rejects_unknown_keys_and_strategy_files() {
+        assert!(Tactic::from_yaml_str("name: T\n").is_ok());
+        assert_unknown_field(
+            Tactic::from_yaml_str("name: T\ngroup_override:\n- {tag_key: c, tag_value: EUR, lower: 0, upper: 1}\n"),
+            "group_override",
+        );
+        // a strategy file used to load as an empty tactic
+        assert_unknown_field(Tactic::from_yaml_str(STRATEGY), "dimensions");
+    }
+
+    #[test]
+    fn test_restrictions_file_rejects_unknown_keys() {
+        let ok = Restrictions::from_yaml_str("long_only: true\nexclusions:\n- !by_asset XYZ\n").unwrap();
+        assert_eq!(ok.exclusions.len(), 1);
+        assert!(!ok.ignore_unknown_assets);
+        // "exclusion" used to load as "no exclusions"
+        assert_unknown_field(
+            Restrictions::from_yaml_str("long_only: true\nexclusion:\n- !by_asset XYZ\n"),
+            "exclusion",
+        );
+        assert_unknown_field(Restrictions::from_yaml_str("max_weight: 0.1\n"), "max_weight");
+        assert_unknown_field(
+            Restrictions::from_yaml_str(
+                "exclusions:\n- !by_tag {tag_key: sector, tag_value: Tobacco, reason: policy}\n",
+            ),
+            "reason",
+        );
+        let lenient = Restrictions::from_yaml_str("ignore_unknown_assets: true\n").unwrap();
+        assert!(lenient.ignore_unknown_assets);
+    }
 }

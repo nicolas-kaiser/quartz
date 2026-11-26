@@ -3,11 +3,28 @@ use serde::{Deserialize, Serialize};
 
 use crate::constraints::{CvarConstraint, GroupConstraint, ScoreConstraint, TrackingErrorConstraint};
 
+/// How dimension weights are applied to the dimensions' values.
+///
+/// See `docs/dimension-normalization.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Normalization {
+    /// Each dimension is divided by its feasible range (best and worst value
+    /// over single-objective solves) before its weight applies, so weights
+    /// are shares of a 0–1 trade-off whatever the units of the scores.
+    #[default]
+    Range,
+    /// Weights multiply the raw values: `weight · wᵀΣw`, `weight · sᵀw`.
+    /// A dimension's influence then depends on the units of its scores.
+    Raw,
+}
+
 /// A portfolio strategy: the long-term investment approach.
 ///
 /// Defines which dimensions to optimize (with weights), and strategic
 /// allocation constraints (currency, sector, asset class bounds).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Strategy {
     pub name: String,
     pub dimensions: Vec<Dimension>,
@@ -24,6 +41,10 @@ pub struct Strategy {
     /// Optional CVaR limit over the universe's return scenarios.
     #[serde(default)]
     pub cvar: Option<CvarConstraint>,
+    /// How dimension weights are applied (default: range-normalised). Used by
+    /// `PortfolioModel::solve`; the bare `compile` functions are always raw.
+    #[serde(default)]
+    pub normalization: Normalization,
 }
 
 fn default_true() -> bool {
@@ -53,6 +74,7 @@ impl Strategy {
             fully_invested: true,
             tracking_error: None,
             cvar: None,
+            normalization: Normalization::default(),
         }
     }
 }
@@ -67,6 +89,7 @@ pub struct StrategyBuilder {
     fully_invested: bool,
     tracking_error: Option<TrackingErrorConstraint>,
     cvar: Option<CvarConstraint>,
+    normalization: Normalization,
 }
 
 impl StrategyBuilder {
@@ -161,6 +184,14 @@ impl StrategyBuilder {
         self
     }
 
+    /// Choose how dimension weights are applied (default
+    /// [`Normalization::Range`]).
+    #[must_use]
+    pub fn normalization(mut self, normalization: Normalization) -> Self {
+        self.normalization = normalization;
+        self
+    }
+
     /// Build the strategy. Normalizes dimension weights to sum to 1.0.
     pub fn build(self) -> Strategy {
         let mut strategy = Strategy {
@@ -171,6 +202,7 @@ impl StrategyBuilder {
             fully_invested: self.fully_invested,
             tracking_error: self.tracking_error,
             cvar: self.cvar,
+            normalization: self.normalization,
         };
         strategy.normalize_dimension_weights();
         strategy
@@ -189,6 +221,7 @@ impl From<Strategy> for StrategyBuilder {
             fully_invested: s.fully_invested,
             tracking_error: s.tracking_error,
             cvar: s.cvar,
+            normalization: s.normalization,
         }
     }
 }

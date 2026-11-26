@@ -216,6 +216,27 @@ impl Strategy {
         slf
     }
 
+    /// How dimension weights are applied: "range" (default) divides each
+    /// dimension by its feasible range first, so weights are shares of a 0–1
+    /// trade-off whatever the units of the scores; "raw" weights the raw
+    /// values. Range costs one extra solve per weighted dimension.
+    fn normalization<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        mode: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let mode = match mode.to_ascii_lowercase().as_str() {
+            "range" => quartz_portfolio::Normalization::Range,
+            "raw" => quartz_portfolio::Normalization::Raw,
+            other => {
+                return Err(qerr(format!(
+                    "unknown normalization '{other}' (expected 'range' or 'raw')"
+                )))
+            }
+        };
+        slf.builder = slf.builder.clone().normalization(mode);
+        Ok(slf)
+    }
+
     /// Load a strategy from YAML text (dimension weights are normalized).
     #[staticmethod]
     fn from_yaml(text: &str) -> PyResult<Self> {
@@ -291,7 +312,10 @@ impl Tactic {
         slf
     }
 
-    /// Override a dimension's weight by name.
+    /// Set a dimension's weight by name. The value is its final share of the
+    /// objective ("risk to 55%" → 0.55); the dimensions that are not
+    /// overridden keep their proportions and share the rest. An unknown
+    /// name, or overrides summing to more than 1, raise QuartzError on solve.
     fn override_weight<'py>(
         mut slf: PyRefMut<'py, Self>,
         dimension_name: &str,
@@ -313,13 +337,14 @@ pub struct Restrictions {
 impl Restrictions {
     #[new]
     #[pyo3(signature = (long_only=false, fully_invested=false, max_single_weight=None,
-                        exclude_assets=None, exclude_tags=None))]
+                        exclude_assets=None, exclude_tags=None, ignore_unknown_assets=false))]
     fn new(
         long_only: bool,
         fully_invested: bool,
         max_single_weight: Option<f64>,
         exclude_assets: Option<Vec<String>>,
         exclude_tags: Option<Vec<(String, String)>>,
+        ignore_unknown_assets: bool,
     ) -> Self {
         let mut builder = quartz_portfolio::Restrictions::builder();
         if long_only {
@@ -337,9 +362,30 @@ impl Restrictions {
         for (k, v) in exclude_tags.unwrap_or_default() {
             builder = builder.exclude_tag(k, v);
         }
+        if ignore_unknown_assets {
+            builder = builder.ignore_unknown_assets();
+        }
         Self {
             inner: builder.build(),
         }
+    }
+
+    /// The exclusions that match no asset of `universe`, as
+    /// `["asset", id]` or `["tag", key, value]` lists. An excluded id that is
+    /// not in the universe is an error on solve unless
+    /// `ignore_unknown_assets=True`.
+    fn unmatched_exclusions(&self, universe: &Universe) -> Vec<Vec<String>> {
+        use quartz_portfolio::constraints::exclusion::Exclusion;
+        self.inner
+            .unmatched_exclusions(&universe.inner)
+            .into_iter()
+            .map(|e| match e {
+                Exclusion::ByAsset(id) => vec!["asset".to_string(), id.to_string()],
+                Exclusion::ByTag { tag_key, tag_value } => {
+                    vec!["tag".to_string(), tag_key, tag_value]
+                }
+            })
+            .collect()
     }
 }
 

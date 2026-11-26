@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::{ConstraintContribution, Triplet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CvarConstraint {
     /// Confidence level in (0, 1); 0.95 = expected loss over the worst 5%.
     pub alpha: f64,
