@@ -63,6 +63,7 @@ them, pass a cap that cannot bind: between two fully invested long-only portfoli
 | `TransactionCostsWithoutTurnover` | costs without a turnover constraint |
 | `TransactionCostDimensionMismatch` | `rates.len() != n_assets` |
 | `InvalidTransactionCost { index, value }` | a rate is negative, NaN or infinite |
+| `UnknownScoreKey` | `score_key` is a score no asset has (a typo would otherwise make the costs do nothing). A key that exists but that no maximised dimension or minimum bound uses is accepted |
 
 ## Rust API
 

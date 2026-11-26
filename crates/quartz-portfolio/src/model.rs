@@ -242,6 +242,15 @@ impl<'a> PortfolioModel<'a> {
         // Merge the tactic once: the ranges belong to the merged constraints,
         // and the scales are indexed by the merged dimensions.
         let base = merged_strategy(strategy, self.tactic)?;
+        // Fail once on a name that matches nothing, not in every anchor solve.
+        compiler::validate_references(
+            self.universe,
+            &base.dimensions,
+            &base.group_constraints,
+            &base.score_constraints,
+            &self.restrictions,
+            self.transaction_costs.as_ref(),
+        )?;
         let ranges = match &self.dimension_ranges {
             Some(r) => {
                 if r.len() != base.dimensions.len() {
@@ -1310,5 +1319,45 @@ mod tests {
         assert!(defensive.variance().unwrap() <= base.variance().unwrap() + 1e-9);
         let turnover: f64 = base.weights_vec.iter().zip(&PREV).map(|(w, p)| (w - p).abs()).sum();
         assert!(turnover <= 0.5 + 1e-6);
+    }
+
+    // ---- names that match nothing ------------------------------------------
+
+    #[test]
+    fn test_typo_in_score_key_fails_before_the_anchor_solves() {
+        // Under range normalisation the error must be the compile error, not
+        // a Normalization error from an anchor of the phantom dimension.
+        let universe = esg_universe(1.0, 1.0);
+        let strategy = Strategy::builder("S")
+            .minimize_risk(0.4)
+            .maximize("expected_return", 0.3)
+            .maximize("enviromental_impact", 0.3)
+            .build();
+        let result = PortfolioModel::new(&universe)
+            .strategy(&strategy)
+            .restrictions(Restrictions::builder().long_only().fully_invested().build())
+            .solve();
+        assert!(matches!(
+            result,
+            Err(PortfolioError::Compile(CompileError::UnknownScoreKey { ref score_key, .. }))
+                if score_key == "enviromental_impact"
+        ));
+    }
+
+    #[test]
+    fn test_unknown_exclusion_is_an_error_unless_opted_out() {
+        let universe = esg_universe(1.0, 1.0);
+        let strategy = esg_strategy(Normalization::Range);
+        let solve = |r: Restrictions| {
+            PortfolioModel::new(&universe).strategy(&strategy).restrictions(r).solve()
+        };
+        let base = || Restrictions::builder().long_only().fully_invested().exclude_asset("TOBACCO_CO");
+        assert!(matches!(
+            solve(base().build()),
+            Err(PortfolioError::Compile(CompileError::UnknownExcludedAssets { ref ids }))
+                if ids == &["TOBACCO_CO"]
+        ));
+        let sol = solve(base().ignore_unknown_assets().build()).unwrap();
+        assert_eq!(sol.status, SolveStatus::Optimal);
     }
 }

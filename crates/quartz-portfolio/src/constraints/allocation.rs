@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 /// Example: GroupConstraint::new("currency", "USD", 0.10, 0.20) means
 /// 10% ≤ Σ(weights of USD assets) ≤ 20%.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GroupConstraint {
     pub tag_key: String,
     pub tag_value: String,

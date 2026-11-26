@@ -770,4 +770,28 @@ mod tests {
             .unwrap();
         assert!(result.dimension_ranges.is_empty());
     }
+
+    #[test]
+    fn test_sweep_over_a_dimension_with_an_unknown_score_key_is_an_error() {
+        // Used to return a frontier with one constant axis.
+        let universe = two_asset_universe();
+        let strategy = Strategy::builder("S").minimize_risk(0.5).maximize("esgg", 0.5).build();
+        for normalization in [Normalization::Range, Normalization::Raw] {
+            let mut s = strategy.clone();
+            s.normalization = normalization;
+            let result = FrontierExplorer::new(&universe, &s)
+                .restrictions(base_restrictions())
+                .sweep("esgg", "financial_risk", 5);
+            assert!(
+                matches!(
+                    result,
+                    Err(FrontierError::Portfolio(PortfolioError::Compile(
+                        crate::compiler::CompileError::UnknownScoreKey { .. }
+                    )))
+                ),
+                "{normalization:?}: {:?}",
+                result.map(|_| ())
+            );
+        }
+    }
 }

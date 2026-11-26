@@ -154,8 +154,44 @@ impl Universe {
         self.assets.iter().position(|a| &a.id == id)
     }
 
+    /// All score keys carried by at least one asset, sorted.
+    pub fn score_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self
+            .assets
+            .iter()
+            .flat_map(|a| a.scores.keys().cloned())
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    /// All tag keys carried by at least one asset, sorted.
+    pub fn tag_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self
+            .assets
+            .iter()
+            .flat_map(|a| a.tags.keys().cloned())
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    /// Indices of the assets that have no value for `score_key`.
+    pub fn assets_missing_score(&self, score_key: &str) -> Vec<usize> {
+        self.assets
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.get_score(score_key).is_none())
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// Compute a weighted portfolio score: Σᵢ wᵢ * scoreᵢ(key).
-    /// Assets missing the score are treated as 0.
+    /// Assets missing the score are treated as 0. That is only safe for
+    /// reporting: the compiler rejects a strategy that optimises or bounds a
+    /// score an investable asset lacks (`docs/reference-validation.md`).
     pub fn portfolio_score(&self, weights: &[f64], score_key: &str) -> f64 {
         self.assets
             .iter()
@@ -165,7 +201,8 @@ impl Universe {
     }
 
     /// Collect scores for a given key across all assets.
-    /// Assets missing the score get 0.0.
+    /// Assets missing the score get 0.0 (see [`portfolio_score`](Self::portfolio_score):
+    /// the compiler only lets that happen for excluded assets).
     pub fn score_vector(&self, score_key: &str) -> Vec<f64> {
         self.assets
             .iter()

@@ -24,6 +24,7 @@ pub enum Normalization {
 /// Defines which dimensions to optimize (with weights), and strategic
 /// allocation constraints (currency, sector, asset class bounds).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Strategy {
     pub name: String,
     pub dimensions: Vec<Dimension>,

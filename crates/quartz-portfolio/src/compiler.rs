@@ -54,6 +54,42 @@ pub enum CompileError {
     /// The universe failed validation (e.g. constructed via its public fields,
     /// bypassing `UniverseBuilder`).
     InvalidUniverse(quartz_core::UniverseError),
+    /// A score key that no asset of the universe carries.
+    UnknownScoreKey {
+        score_key: String,
+        /// What refers to it, e.g. "dimension 'esg'".
+        used_by: String,
+        /// The score keys the universe does have.
+        available: Vec<String>,
+    },
+    /// A score that is optimised or bounded is missing on assets that can be
+    /// held (a missing value would count as 0).
+    MissingScores {
+        score_key: String,
+        used_by: String,
+        /// Ids of the non-excluded assets without the score.
+        assets: Vec<String>,
+    },
+    /// A group constraint or tag exclusion uses a tag key no asset carries.
+    UnknownTagKey {
+        tag_key: String,
+        tag_value: String,
+        used_by: String,
+        available: Vec<String>,
+    },
+    /// A tag value matches no asset but differs from an existing value only
+    /// by case or surrounding spaces.
+    TagValueNearMiss {
+        tag_key: String,
+        tag_value: String,
+        existing: String,
+        used_by: String,
+    },
+    /// Exclusions name asset ids that are not in the universe.
+    UnknownExcludedAssets { ids: Vec<String> },
+    /// An excluded asset id is not in the universe but differs from an
+    /// existing id only by case or surrounding spaces.
+    ExcludedAssetNearMiss { id: String, existing: String },
 }
 
 impl std::fmt::Display for CompileError {
@@ -111,6 +147,59 @@ impl std::fmt::Display for CompileError {
                 write!(f, "Tracking error needs a PSD covariance: {msg}")
             }
             CompileError::InvalidUniverse(e) => write!(f, "Invalid universe: {e}"),
+            CompileError::UnknownScoreKey { score_key, used_by, available } => {
+                write!(
+                    f,
+                    "No asset has a score '{score_key}' (used by {used_by}); scores in \
+                     the universe: {}",
+                    list(available)
+                )?;
+                match score_key.as_str() {
+                    "financial_risk" => write!(
+                        f,
+                        ". Portfolio variance is not a score: use minimize_risk \
+                         (a `type: quadratic` dimension)"
+                    ),
+                    "tracking_error" | "cvar" => write!(
+                        f,
+                        ". '{score_key}' is not a score: use the strategy's \
+                         {score_key} constraint"
+                    ),
+                    _ => Ok(()),
+                }
+            }
+            CompileError::MissingScores { score_key, used_by, assets } => write!(
+                f,
+                "Score '{score_key}' (used by {used_by}) is missing on {} asset(s) that \
+                 can be held: {}. A missing score would count as 0; set the score or \
+                 exclude the asset",
+                assets.len(),
+                list(assets)
+            ),
+            CompileError::UnknownTagKey { tag_key, tag_value, used_by, available } => write!(
+                f,
+                "No asset has a tag '{tag_key}' (used by {used_by} on \
+                 {tag_key}={tag_value}); tags in the universe: {}",
+                list(available)
+            ),
+            CompileError::TagValueNearMiss { tag_key, tag_value, existing, used_by } => write!(
+                f,
+                "No asset has {tag_key}='{tag_value}' (used by {used_by}), but \
+                 '{existing}' exists; tag values are case-sensitive"
+            ),
+            CompileError::UnknownExcludedAssets { ids } => write!(
+                f,
+                "{} excluded asset id(s) are not in the universe: {}. Correct them, or \
+                 set ignore_unknown_assets on the restrictions if the list is meant to \
+                 cover more than this universe",
+                ids.len(),
+                list(ids)
+            ),
+            CompileError::ExcludedAssetNearMiss { id, existing } => write!(
+                f,
+                "Excluded asset id '{id}' is not in the universe, but '{existing}' is; \
+                 asset ids are case-sensitive"
+            ),
         }
     }
 }
@@ -123,6 +212,148 @@ impl std::error::Error for CompileError {
             _ => None,
         }
     }
+}
+
+/// A list of names for an error message, shortened after ten entries.
+fn list(names: &[String]) -> String {
+    const MAX: usize = 10;
+    if names.is_empty() {
+        return "(none)".to_string();
+    }
+    let shown = names.iter().take(MAX).cloned().collect::<Vec<_>>().join(", ");
+    if names.len() > MAX {
+        format!("{shown}, … ({} more)", names.len() - MAX)
+    } else {
+        shown
+    }
+}
+
+/// Case- and whitespace-insensitive form of a name, to detect near-misses.
+fn folded(s: &str) -> String {
+    s.trim().to_lowercase()
+}
+
+/// Reject names that match nothing, before they silently do nothing: score
+/// keys, tag keys and excluded asset ids. See `docs/reference-validation.md`.
+///
+/// Takes the merged strategy's parts, so tactic groups and score bounds are
+/// covered. Dimension weights are ignored on purpose: a dimension at weight 0
+/// (anchor solves, frontier end points) is held to the same rules.
+pub(crate) fn validate_references(
+    universe: &Universe,
+    dimensions: &[quartz_core::Dimension],
+    group_constraints: &[crate::constraints::GroupConstraint],
+    score_constraints: &[crate::constraints::ScoreConstraint],
+    restrictions: &Restrictions,
+    costs: Option<&TransactionCosts>,
+) -> Result<(), CompileError> {
+    use crate::constraints::exclusion::Exclusion;
+
+    let tag_keys = universe.tag_keys();
+    let check_tag = |tag_key: &str, tag_value: &str, used_by: &str| {
+        if !tag_keys.iter().any(|k| k == tag_key) {
+            return Err(CompileError::UnknownTagKey {
+                tag_key: tag_key.to_string(),
+                tag_value: tag_value.to_string(),
+                used_by: used_by.to_string(),
+                available: tag_keys.clone(),
+            });
+        }
+        // A value absent from this universe is legitimate ("no Tobacco" where
+        // there is none) unless it is an existing value misspelt in case.
+        let values = universe.tag_values(tag_key);
+        if !values.iter().any(|v| v == tag_value) {
+            if let Some(existing) = values.iter().find(|v| folded(v) == folded(tag_value)) {
+                return Err(CompileError::TagValueNearMiss {
+                    tag_key: tag_key.to_string(),
+                    tag_value: tag_value.to_string(),
+                    existing: existing.clone(),
+                    used_by: used_by.to_string(),
+                });
+            }
+        }
+        Ok(())
+    };
+
+    // Exclusions
+    let mut unknown_ids: Vec<String> = Vec::new();
+    for exclusion in &restrictions.exclusions {
+        match exclusion {
+            Exclusion::ByTag { tag_key, tag_value } => check_tag(tag_key, tag_value, "an exclusion")?,
+            Exclusion::ByAsset(id) => {
+                if universe.asset_index(id).is_some() {
+                    continue;
+                }
+                if let Some(existing) = universe
+                    .assets
+                    .iter()
+                    .find(|a| folded(a.id.as_str()) == folded(id.as_str()))
+                {
+                    return Err(CompileError::ExcludedAssetNearMiss {
+                        id: id.to_string(),
+                        existing: existing.id.to_string(),
+                    });
+                }
+                if !unknown_ids.contains(&id.0) {
+                    unknown_ids.push(id.0.clone());
+                }
+            }
+        }
+    }
+    if !unknown_ids.is_empty() && !restrictions.ignore_unknown_assets {
+        return Err(CompileError::UnknownExcludedAssets { ids: unknown_ids });
+    }
+
+    // Group constraints
+    for gc in group_constraints {
+        check_tag(&gc.tag_key, &gc.tag_value, "a group constraint")?;
+    }
+
+    // Score keys. An excluded asset is pinned to weight 0 and needs no score.
+    let excluded: BTreeSet<usize> = restrictions
+        .exclusions
+        .iter()
+        .flat_map(|e| e.excluded_indices(universe))
+        .collect();
+    let score_keys = universe.score_keys();
+    let check_score = |score_key: &str, used_by: String, needs_every_asset: bool| {
+        if !score_keys.iter().any(|k| k == score_key) {
+            return Err(CompileError::UnknownScoreKey {
+                score_key: score_key.to_string(),
+                used_by,
+                available: score_keys.clone(),
+            });
+        }
+        if needs_every_asset {
+            let missing: Vec<String> = universe
+                .assets_missing_score(score_key)
+                .into_iter()
+                .filter(|i| !excluded.contains(i))
+                .map(|i| universe.assets[i].id.to_string())
+                .collect();
+            if !missing.is_empty() {
+                return Err(CompileError::MissingScores {
+                    score_key: score_key.to_string(),
+                    used_by,
+                    assets: missing,
+                });
+            }
+        }
+        Ok(())
+    };
+    for dim in dimensions {
+        if let DimensionType::Linear { score_key } = &dim.dim_type {
+            check_score(score_key, format!("dimension '{}'", dim.name), true)?;
+        }
+    }
+    for sc in score_constraints {
+        check_score(&sc.score_key, "a score constraint".to_string(), true)?;
+    }
+    if let Some(tc) = costs {
+        // Only the name matters here: the costs themselves are `rates`.
+        check_score(&tc.score_key, "the transaction costs".to_string(), false)?;
+    }
+    Ok(())
 }
 
 impl From<tactic::MergeError> for CompileError {
@@ -273,6 +504,16 @@ pub(crate) fn compile_scaled(
 
     // Step 1: Merge strategy + tactic
     let merged = tactic::merge(strategy, tactic)?;
+
+    // Names that match nothing are errors, not silent no-ops
+    validate_references(
+        universe,
+        &merged.dimensions,
+        &merged.group_constraints,
+        &merged.score_constraints,
+        restrictions,
+        costs,
+    )?;
 
     // Step 2: Compute excluded asset indices (sorted, so the exclusion rows —
     // and their duals — are always in asset order)
@@ -1196,5 +1437,230 @@ mod tests {
             }
         }
         assert!(with(Some(&turnover), vec![0.0; 3]).is_ok());
+    }
+
+    // ---- reference validation ----------------------------------------------
+
+    /// A: USD, return + esg. B: EUR, return + esg. C: EUR, return only.
+    fn sparse_universe() -> Universe {
+        Universe::builder()
+            .add_asset(
+                Asset::new("A")
+                    .tag("currency", "USD")
+                    .score("expected_return", 0.10)
+                    .score("esg", 6.0),
+            )
+            .add_asset(
+                Asset::new("B")
+                    .tag("currency", "EUR")
+                    .score("expected_return", 0.05)
+                    .score("esg", 8.0),
+            )
+            .add_asset(Asset::new("C").tag("currency", "EUR").score("expected_return", 0.03))
+            .covariance_full(CscMatrix::from(&[
+                [0.04, 0.0, 0.0],
+                [0.0, 0.02, 0.0],
+                [0.0, 0.0, 0.01],
+            ]))
+            .build()
+            .unwrap()
+    }
+
+    fn compile_sparse(
+        strategy: &Strategy,
+        tactic: Option<&Tactic>,
+        restrictions: &Restrictions,
+    ) -> Result<CompiledProblem, CompileError> {
+        compile(&sparse_universe(), strategy, tactic, restrictions, None)
+    }
+
+    fn risk_and(key: &str) -> Strategy {
+        Strategy::builder("S").minimize_risk(0.5).minimize(key, 0.5).build()
+    }
+
+    #[test]
+    fn test_unknown_score_key_in_a_dimension() {
+        let err = compile_sparse(&risk_and("esgg"), None, &Restrictions::default()).unwrap_err();
+        match &err {
+            CompileError::UnknownScoreKey { score_key, used_by, available } => {
+                assert_eq!(score_key, "esgg");
+                assert_eq!(used_by, "dimension 'esgg'");
+                assert_eq!(available, &["esg", "expected_return"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(msg.contains("'esgg'") && msg.contains("esg, expected_return"), "{msg}");
+    }
+
+    #[test]
+    fn test_unknown_score_key_at_weight_zero_is_still_an_error() {
+        // Anchor solves and frontier end points carry weight 0: same rule.
+        let mut s = risk_and("esgg");
+        s.dimensions[1].weight = 0.0;
+        assert!(matches!(
+            compile_sparse(&s, None, &Restrictions::default()),
+            Err(CompileError::UnknownScoreKey { .. })
+        ));
+    }
+
+    #[test]
+    fn test_reserved_metric_names_get_a_hint() {
+        let msg = compile_sparse(&risk_and("financial_risk"), None, &Restrictions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("minimize_risk"), "{msg}");
+        let s = Strategy::builder("S").minimize_risk(1.0).score_max("cvar", 0.1).build();
+        let msg = compile_sparse(&s, None, &Restrictions::default()).unwrap_err().to_string();
+        assert!(msg.contains("cvar constraint"), "{msg}");
+    }
+
+    #[test]
+    fn test_score_missing_on_a_holdable_asset() {
+        // C has no esg: read as 0 it would be the best asset for "minimise esg".
+        let err = compile_sparse(&risk_and("esg"), None, &Restrictions::default()).unwrap_err();
+        match &err {
+            CompileError::MissingScores { score_key, assets, .. } => {
+                assert_eq!(score_key, "esg");
+                assert_eq!(assets, &["C"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(err.to_string().contains("exclude the asset"));
+
+        // Excluded assets need no score, by id or by tag
+        let by_id = Restrictions::builder().exclude_asset("C").build();
+        assert!(compile_sparse(&risk_and("esg"), None, &by_id).is_ok());
+        let by_tag = Restrictions::builder().exclude_tag("currency", "EUR").build();
+        let err = compile_sparse(&risk_and("esg"), None, &by_tag);
+        assert!(err.is_ok(), "B and C excluded, A has the score");
+    }
+
+    #[test]
+    fn test_score_constraints_need_the_score_too() {
+        let s = Strategy::builder("S").minimize_risk(1.0).score_max("esg", 7.0).build();
+        assert!(matches!(
+            compile_sparse(&s, None, &Restrictions::default()),
+            Err(CompileError::MissingScores { ref used_by, .. }) if used_by == "a score constraint"
+        ));
+        let s = Strategy::builder("S").minimize_risk(1.0).score_min("esgg", 7.0).build();
+        assert!(matches!(
+            compile_sparse(&s, None, &Restrictions::default()),
+            Err(CompileError::UnknownScoreKey { .. })
+        ));
+        // ... and so does a bound that only the tactic adds
+        let s = Strategy::builder("S").minimize_risk(1.0).build();
+        let t = Tactic::builder("T")
+            .override_score(crate::constraints::ScoreConstraint::min("esg", 7.0))
+            .build();
+        assert!(matches!(
+            compile_sparse(&s, Some(&t), &Restrictions::default()),
+            Err(CompileError::MissingScores { .. })
+        ));
+    }
+
+    #[test]
+    fn test_transaction_cost_key_must_exist_but_need_not_be_used() {
+        let u = sparse_universe();
+        let s = Strategy::builder("S").minimize_risk(1.0).build();
+        let r = Restrictions::default();
+        let turnover = TurnoverConstraint::new(vec![1.0 / 3.0; 3], 0.5);
+        let compile_costs = |key: &str| {
+            let tc = TransactionCosts::new(vec![0.01; 3], key);
+            compile_with_costs(&u, &s, None, &r, Some(&turnover), Some(&tc))
+        };
+        match compile_costs("expected_retrun") {
+            Err(CompileError::UnknownScoreKey { used_by, .. }) => {
+                assert_eq!(used_by, "the transaction costs")
+            }
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        // Existing key nothing consumes: inert, as documented
+        assert!(compile_costs("expected_return").is_ok());
+        // The costs key is a name only: a partial score is fine here
+        assert!(compile_costs("esg").is_ok());
+    }
+
+    #[test]
+    fn test_unknown_tag_key() {
+        let s = Strategy::builder("S").minimize_risk(1.0).group("curency", "EUR", 0.0, 0.5).build();
+        match compile_sparse(&s, None, &Restrictions::default()) {
+            Err(CompileError::UnknownTagKey { tag_key, available, used_by, .. }) => {
+                assert_eq!(tag_key, "curency");
+                assert_eq!(available, ["currency"]);
+                assert_eq!(used_by, "a group constraint");
+            }
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        // a group only the tactic has
+        let s = Strategy::builder("S").minimize_risk(1.0).build();
+        let t = Tactic::builder("T").override_group("sector", "Tech", 0.0, 0.5).build();
+        assert!(matches!(
+            compile_sparse(&s, Some(&t), &Restrictions::default()),
+            Err(CompileError::UnknownTagKey { .. })
+        ));
+        // a tag exclusion
+        let r = Restrictions::builder().exclude_tag("sectr", "Tobacco").build();
+        assert!(matches!(
+            compile_sparse(&s, None, &r),
+            Err(CompileError::UnknownTagKey { ref used_by, .. }) if used_by == "an exclusion"
+        ));
+    }
+
+    #[test]
+    fn test_absent_tag_value_is_legal_unless_a_near_miss() {
+        let s = Strategy::builder("S").minimize_risk(1.0).group("currency", "JPY", 0.0, 0.2).build();
+        assert!(compile_sparse(&s, None, &Restrictions::default()).is_ok());
+        let r = Restrictions::builder().exclude_tag("currency", "GBP").build();
+        assert!(compile_sparse(&s, None, &r).is_ok());
+
+        // "usd" is "USD" misspelt: as a new tactic group it would cap nothing
+        let base = Strategy::builder("S").minimize_risk(1.0).group("currency", "USD", 0.0, 0.5).build();
+        let t = Tactic::builder("T").override_group("currency", "usd", 0.0, 0.1).build();
+        match compile_sparse(&base, Some(&t), &Restrictions::default()) {
+            Err(CompileError::TagValueNearMiss { tag_value, existing, .. }) => {
+                assert_eq!((tag_value.as_str(), existing.as_str()), ("usd", "USD"));
+            }
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        let r = Restrictions::builder().exclude_tag("currency", " EUR").build();
+        assert!(matches!(
+            compile_sparse(&base, None, &r),
+            Err(CompileError::TagValueNearMiss { .. })
+        ));
+    }
+
+    #[test]
+    fn test_unknown_excluded_assets() {
+        let s = Strategy::builder("S").minimize_risk(1.0).build();
+        let r = Restrictions::builder()
+            .exclude_asset("A")
+            .exclude_asset("XYZ")
+            .exclude_asset("OLD")
+            .exclude_asset("XYZ")
+            .build();
+        match compile_sparse(&s, None, &r) {
+            Err(CompileError::UnknownExcludedAssets { ids }) => assert_eq!(ids, ["XYZ", "OLD"]),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        assert_eq!(r.unmatched_exclusions(&sparse_universe()).len(), 3);
+
+        // Opt-out: the known id is still excluded, the unknown ones skipped
+        let lenient = Restrictions::builder()
+            .exclude_asset("A")
+            .exclude_asset("XYZ")
+            .ignore_unknown_assets()
+            .build();
+        let p = compile_sparse(&s, None, &lenient).unwrap();
+        assert_eq!(p.b.len(), 2, "budget row + one exclusion row");
+
+        // ... but a near-miss is an error even then
+        let typo = Restrictions::builder().exclude_asset("a").ignore_unknown_assets().build();
+        match compile_sparse(&s, None, &typo) {
+            Err(CompileError::ExcludedAssetNearMiss { id, existing }) => {
+                assert_eq!((id.as_str(), existing.as_str()), ("a", "A"));
+            }
+            other => panic!("{:?}", other.map(|_| ())),
+        }
     }
 }

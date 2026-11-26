@@ -122,6 +122,7 @@ def _build_restrictions(rspec: dict):
         max_single_weight=rspec.get("max_single_weight"),
         exclude_assets=rspec.get("exclude_assets", []),
         exclude_tags=[tuple(t) for t in rspec.get("exclude_tags", [])],
+        ignore_unknown_assets=rspec.get("ignore_unknown_assets", False),
     )
 
 

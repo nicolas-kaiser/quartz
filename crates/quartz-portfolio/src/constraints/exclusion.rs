@@ -7,6 +7,7 @@ use quartz_core::{AssetId, Universe};
 /// In YAML: `by_tag: {tag_key: sector, tag_value: Tobacco}` or `by_asset: XYZ`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum Exclusion {
     /// Exclude all assets matching a tag key-value pair.
     ByTag { tag_key: String, tag_value: String },
